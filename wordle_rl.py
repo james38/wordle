@@ -27,12 +27,14 @@ class WordleEnv(gym.Env):
         self.seed()
 
         self.load_words(valid_words_loc)
+        # construct the possible actions as integer-indexed valid words
         self.action_words = [(i, w) for i, w in enumerate(self.words)]
 
         self.n_letters = n_letters
         self.max_attempts = max_attempts
         self.L = L
         self.gen_reward()
+        self.reward_range = (0,1)
 
         alphabet = list(string.ascii_lowercase)
         self.len_alphabet = len(alphabet)
@@ -100,6 +102,10 @@ class WordleEnv(gym.Env):
 
 
     def reset(self, secret_word=None):
+        """
+        restarts the environment for a new episode
+        returns the starting state as a value of self.observation_space
+        """
         if secret_word is None:
             self.secret_word = get_random_secret_word()
         else:
@@ -116,6 +122,15 @@ class WordleEnv(gym.Env):
 
 
     def step(self, action):
+        """
+        takes as input action within self.action_space
+        the environment responds with the resultant state
+        a 4 tuple of:
+          state - same type as reset method return
+          reward - a return value received from transitioning to the new state
+          done - a boolean for whether the episode is over
+          info - an optional dictionary that may be useful to populate
+        """
         assert self.action_space.contains(action)
         guess = self.words[action]
 
@@ -167,6 +182,10 @@ class WordleEnv(gym.Env):
 
 
     def gt_n_poisson(self, L, n):
+        """
+        returns the inverse of the Poisson CDF with mean, L, at x=n integer
+        """
+        assert type(n) is int, "sample value must be integer"
         sum_prob = 0
         for i in range(n):
             sum_prob += (L**i) / math.factorial(i)
@@ -175,6 +194,10 @@ class WordleEnv(gym.Env):
 
 
     def gen_reward(self):
+        """
+        returns the reward structure that provides return in proportion to
+        the number of guesses for success
+        """
         self.rewards = [
             self.gt_n_poisson(self.L, i)
             for i in range(1, 1 + self.max_attempts)
