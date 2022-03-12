@@ -231,12 +231,6 @@ class WordleEnv(gym.Env):
         return None
 
 
-class Wordler(object):
-    def __init__(self):
-        self.env = gym.make(WordleEnv).env
-        self.env.seed(19)
-
-
 def main():
     wordle = WordleEnv()
     return None
