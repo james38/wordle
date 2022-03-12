@@ -30,6 +30,8 @@ class WordleEnv(gym.Env):
         # construct the possible actions as integer-indexed valid words
         self.action_words = [(i, w) for i, w in enumerate(self.words)]
 
+        assert type(n_letters) is int, "number of letters must be int"
+        assert type(max_attempts) is int, "number of max attempts must be int"
         self.n_letters = n_letters
         self.max_attempts = max_attempts
         self.L = L
@@ -50,6 +52,7 @@ class WordleEnv(gym.Env):
         #   (eg. this can include letters that are yellow or green)
         #  the second discrete input is the maximum number of yellows seen
         #   for any guess for that letter (up to 2 for a 5 letter guess)
+        # this is a required variable for the environment
         self.observation_space = spaces.Tuple(
             (
                 spaces.MultiDiscrete(
@@ -68,18 +71,16 @@ class WordleEnv(gym.Env):
             + 2 * self.len_alphabet
         )
 
+        # required variable for environment
         self.action_space = spaces.Discrete(len(self.words))
 
         self.load_solutions(solution_words_loc)
         if secret_word is None:
             self.reset()
         else:
+            assert type(secret_word) is str, "secret word must be str"
+            assert len(secret_word) == n_letters, "secret word wrong length"
             self.reset(secret_word)
-
-        assert type(secret_word) is str, "secret word must be str"
-        assert type(n_letters) is int, "number of letters must be int"
-        assert len(secret_word) == n_letters, "secret word wrong length"
-        assert type(max_attempts) is int, "number of max attempts must be int"
 
 
     def load_words(self, valid_words_loc):
@@ -107,7 +108,7 @@ class WordleEnv(gym.Env):
         returns the starting state as a value of self.observation_space
         """
         if secret_word is None:
-            self.secret_word = get_random_secret_word()
+            self.secret_word = self.get_random_secret_word()
         else:
             self.secret_word = secret_word
         self.n_guesses = 0
@@ -139,6 +140,7 @@ class WordleEnv(gym.Env):
             if j in self.incorrect_letters:
                 return [self.state, self.reward, self.done, self.info]
 
+            breakpoint()
             j_is_exceeded = self.state[
                 2*(self.alphabet_order[j] - self.len_alphabet)
             ]
@@ -151,11 +153,12 @@ class WordleEnv(gym.Env):
 
         self.n_guesses += 1
         self.state[0] = self.n_guesses
-        if self.n_guesses == self.max_attempts:
-            self.done = True
 
         if guess == self.secret_word:
             self.reward = self.rewards[self.n_guesses - 1]
+            self.done = True
+
+        if self.n_guesses == self.max_attempts:
             self.done = True
 
         for i,j in enumerate(guess):
