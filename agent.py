@@ -6,7 +6,8 @@ from wordle_rl import WordleEnv
 
 class Wordler(object):
     def __init__(self):
-        self.env = gym.make(WordleEnv).env
+        # self.env = gym.make(WordleEnv).env
+        self.env = WordleEnv()
         self.env.seed(19)
         self.np_rng = np.random.default_rng(19)
 
