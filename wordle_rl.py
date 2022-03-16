@@ -23,6 +23,7 @@ class WordleEnv(gym.Env):
         n_letters=5,
         max_attempts=6,
         L=3.4,
+        min_guesses=True,
     ):
         self.seed()
 
@@ -35,7 +36,7 @@ class WordleEnv(gym.Env):
         self.n_letters = n_letters
         self.max_attempts = max_attempts
         self.L = L
-        self.gen_reward()
+        self.gen_reward(min_guesses)
         self.reward_range = (0,1) # optional to specify
 
         alphabet = list(string.ascii_lowercase)
@@ -179,6 +180,7 @@ class WordleEnv(gym.Env):
                         return [self.state, self.reward, self.done, self.info]
 
             # constraint 3: not using known yellow letter
+            #  note: it is allowable to guess a yellow again in the same place
             for correct_char, correct_pos_val in correct_char_vals.items():
                 if np.any(np.equal(1, correct_pos_val)):
                     # constraint 2 handles that greens are in correct place
@@ -190,7 +192,7 @@ class WordleEnv(gym.Env):
         # if the guess passes all the hard mode constraints, then it's valid
         self.n_guesses += 1
         self.state[0] = self.n_guesses
-
+        print(guess)
         if guess == self.secret_word:
             self.reward = self.rewards[self.n_guesses - 1]
             self.done = True
@@ -199,38 +201,21 @@ class WordleEnv(gym.Env):
             self.done = True
 
         # get char metadata
-        char_meta = {
-            j: (
-                # is exceeded
-                self.state[2*(self.alphabet_order[j] - self.len_alphabet)],
-                # max yellows
-                self.state[(self.alphabet_order[j] - self.len_alphabet)],
-            ) for j in guess_chars
-        }
-
-        # vals = np.zeros(self.n_letters)
-        # for i,j in enumerate(guess):
-        #     vals[i] = self.state[
-        #         (
-        #             1
-        #             + (self.alphabet_order[j] * self.n_letters)
-        #             + i
-        #         )
-        #     ]
-        # n_greens = np.sum(vals == 2)
-        # n_yellows = np.sum(vals == 1)
-
-        # for i,j in enumerate(guess):
-        #     char_pos_vals[j]
-        #     char_meta[j]
-        #     pos_vals[i]
+        # char_meta = {
+        #     j: (
+        #         # is exceeded
+        #         self.state[2*(self.alphabet_order[j] - self.len_alphabet)],
+        #         # max yellows
+        #         self.state[(self.alphabet_order[j] - self.len_alphabet)],
+        #     ) for j in guess_chars
+        # }
 
         # process the new state after the guess
         # process correct guesses, which should be done first,
         #  not processing yellows and others at the same time
         for i,j in enumerate(guess):
             if j == self.secret_word[i]:
-                # set all other chars in that position to 0
+                # set all chars in that position to 0
                 self.state[(1 + i):(-2 * self.len_alphabet):self.n_letters] = 0
                 # set the correct char in that position to 2
                 self.state[1 + self.alphabet_order[j] * self.n_letters + i] = 2
@@ -257,19 +242,37 @@ class WordleEnv(gym.Env):
             ]
             for j in guess_chars
         }
+
+        # process yellows and others
         for i,j in enumerate(guess):
             if (j in self.secret_word) and (j != self.secret_word[i]):
-                if (
-                    self.secret_word.count(j)
-                    > np.sum(np.equal(2, char_pos_vals[j]))
-                ):
+                n_greens = np.sum(np.equal(2, char_pos_vals[j]))
+                extra_char = self.secret_word.count(j) - n_greens
+                if extra_char > 0:
+                    extra_guess_char = guess.count(j) - n_greens
+                    n_yellows = min(extra_char, extra_guess_char)
+                    # if extra_guess_char is greater than n_yellows,
+                    #  it really doesn't matter which is shown as yellow or not,
+                    #  as in the game, since we already store the info of how
+                    #  many maximum yellows we have, and either position is
+                    #  known not to be the correct position, since it's yellow
+                    self.state[
+                        (self.alphabet_order[j] - self.len_alphabet)
+                    ] = max(
+                        self.state[self.alphabet_order[j] - self.len_alphabet],
+                        n_yellows
+                    )
+
+                    # if there are no known possible yellows of that char,
+                    #  then set all non-green to possible yellow
                     if not np.any(np.equal(1, char_pos_vals[j])):
-                        # this should work
                         char_pos_vals[j] = np.where(
                             char_pos_vals[j] == 0, 1, char_pos_vals[j]
                         )
                     else:
                         pass # it was already yellow
+                    # set the current position to other, since if it was
+                    #  the correct position, then it would have been green
                     char_pos_vals[j][i] = 0
                     self.state[
                         (1 + self.n_letters * self.alphabet_order[j]):
@@ -277,8 +280,14 @@ class WordleEnv(gym.Env):
                     ] = char_pos_vals[j]
                 else:
                     self.overused_letters.append(j)
+                    self.state[
+                        (self.alphabet_order[j] - 2*self.len_alphabet)
+                    ] = 1
             elif j not in self.secret_word:
                 self.overused_letters.append(j)
+                self.state[(self.alphabet_order[j] - 2*self.len_alphabet)] = 1
+            else:
+                pass # the guess was correct and processed already
 
 
         return [self.state, self.reward, self.done, self.info]
@@ -296,15 +305,18 @@ class WordleEnv(gym.Env):
         return 1 - sum_prob
 
 
-    def gen_reward(self):
+    def gen_reward(self, min_guesses):
         """
         returns the reward structure that provides return in proportion to
         the number of guesses for success
         """
-        self.rewards = [
-            self.gt_n_poisson(self.L, i)
-            for i in range(1, 1 + self.max_attempts)
-        ]
+        if min_guesses:
+            self.rewards = [
+                self.gt_n_poisson(self.L, i)
+                for i in range(1, 1 + self.max_attempts)
+            ]
+        else:
+            self.rewards = [1 for i in range(1, 1 + self.max_attempts)]
         return None
 
 
