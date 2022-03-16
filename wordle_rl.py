@@ -52,6 +52,7 @@ class WordleEnv(gym.Env):
         #   (eg. this can include letters that are yellow or green)
         #  the second discrete input is the maximum number of yellows seen
         #   for any guess for that letter (up to 2 for a 5 letter guess)
+        #   less any subsequent greens of that letter
         # this is a required variable for the environment
         self.observation_space = spaces.Tuple(
             (
@@ -180,9 +181,10 @@ class WordleEnv(gym.Env):
             # constraint 3: not using known yellow letter
             for correct_char, correct_pos_val in correct_char_vals.items():
                 if np.any(np.equal(1, correct_pos_val)):
-                    n_greens = np.sum(np.equal(2, correct_pos_val))
                     # constraint 2 handles that greens are in correct place
-                    if guess.count(correct_char) < n_greens + 1:
+                    if guess.count(correct_char) < (
+                        1 + np.sum(np.equal(2, correct_pos_val))
+                    ):
                         return [self.state, self.reward, self.done, self.info]
 
         # if the guess passes all the hard mode constraints, then it's valid
@@ -224,22 +226,60 @@ class WordleEnv(gym.Env):
         #     pos_vals[i]
 
         # process the new state after the guess
+        # process correct guesses, which should be done first,
+        #  not processing yellows and others at the same time
         for i,j in enumerate(guess):
             if j == self.secret_word[i]:
-                self.state[
-                    1 + self.alphabet_order[j] * self.n_letters + i
-                ] = 2
-            elif j in self.secret_word:
-                letter_state = self.state[
-                    (
-                        1 + self.alphabet_order[j] * self.n_letters
-                    ):(
-                        1 + self.alphabet_order[j] * self.n_letters
-                        + self.n_letters
+                # set all other chars in that position to 0
+                self.state[(1 + i):(-2 * self.len_alphabet):self.n_letters] = 0
+                # set the correct char in that position to 2
+                self.state[1 + self.alphabet_order[j] * self.n_letters + i] = 2
+                # if that char had seen yellow(s), increment the yellows down
+                if self.state[self.alphabet_order[j] - self.len_alphabet] == 1:
+                    self.state[self.alphabet_order[j] - self.len_alphabet] = 0
+                    # if that was the only yellow, then remove the other
+                    #  positions of that char from being known possible yellow
+                    char_pos_vals[j] = np.where(
+                        char_pos_vals[j] == 1, 0, char_pos_vals[j]
                     )
-                ]
-            else:
+                    self.state[
+                        (1 + self.n_letters * self.alphabet_order[j]):
+                        (1 + self.n_letters * (self.alphabet_order[j] + 1))
+                    ] = char_pos_vals[j]
+                if self.state[self.alphabet_order[j] - self.len_alphabet] == 2:
+                    self.state[self.alphabet_order[j] - self.len_alphabet] = 1
+
+        # get current status of individual letters of the guess
+        char_pos_vals = {
+            j: self.state[
+                (1 + self.n_letters * self.alphabet_order[j]):
+                (1 + self.n_letters * (self.alphabet_order[j] + 1))
+            ]
+            for j in guess_chars
+        }
+        for i,j in enumerate(guess):
+            if (j in self.secret_word) and (j != self.secret_word[i]):
+                if (
+                    self.secret_word.count(j)
+                    > np.sum(np.equal(2, char_pos_vals[j]))
+                ):
+                    if not np.any(np.equal(1, char_pos_vals[j])):
+                        # this should work
+                        char_pos_vals[j] = np.where(
+                            char_pos_vals[j] == 0, 1, char_pos_vals[j]
+                        )
+                    else:
+                        pass # it was already yellow
+                    char_pos_vals[j][i] = 0
+                    self.state[
+                        (1 + self.n_letters * self.alphabet_order[j]):
+                        (1 + self.n_letters * (self.alphabet_order[j] + 1))
+                    ] = char_pos_vals[j]
+                else:
+                    self.overused_letters.append(j)
+            elif j not in self.secret_word:
                 self.overused_letters.append(j)
+
 
         return [self.state, self.reward, self.done, self.info]
 
