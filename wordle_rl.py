@@ -36,7 +36,7 @@ class WordleEnv(gym.Env):
         self.max_attempts = max_attempts
         self.L = L
         self.gen_reward()
-        self.reward_range = (0,1)
+        self.reward_range = (0,1) # optional to specify
 
         alphabet = list(string.ascii_lowercase)
         self.len_alphabet = len(alphabet)
@@ -111,8 +111,14 @@ class WordleEnv(gym.Env):
             self.secret_word = self.get_random_secret_word()
         else:
             self.secret_word = secret_word
+        self.correct_chars = set(list(self.secret_word))
+
         self.n_guesses = 0
-        self.incorrect_letters = list()
+        self.overused_letters = list()
+        self.non_letters = {
+            char: i for char, i in self.alphabet_order.items()
+            if char not in self.secret_word
+        }
 
         self.state = self.base_obs.copy()
         self.reward = 0
@@ -135,22 +141,51 @@ class WordleEnv(gym.Env):
         assert self.action_space.contains(action)
         guess = self.words[action]
 
-        # hard mode constraint
-        for j in guess:
-            if j in self.incorrect_letters:
-                return [self.state, self.reward, self.done, self.info]
-
-            breakpoint()
-            j_is_exceeded = self.state[
-                2*(self.alphabet_order[j] - self.len_alphabet)
+        # get current status of individual letters of the guess
+        guess_chars = set(list(guess))
+        char_pos_vals = {
+            j: self.state[
+                (1 + self.n_letters * self.alphabet_order[j]):
+                (1 + self.n_letters * (self.alphabet_order[j] + 1))
             ]
-            j_max_yellows = self.state[
-                (self.alphabet_order[j] - self.len_alphabet)
+            for j in guess_chars
+        }
+        # get current positions' status
+        pos_vals = {
+            i: self.state[(1 + i):(-2 * self.len_alphabet):self.n_letters]
+            for i in range(self.n_letters)
+        }
+        # get current individual letter status of the secret word
+        correct_char_vals = {
+            j: self.state[
+                (1 + self.n_letters * self.alphabet_order[j]):
+                (1 + self.n_letters * (self.alphabet_order[j] + 1))
             ]
+            for j in self.correct_chars
+        }
 
-            # if ():
-            #     return [self.state, self.reward, self.done, self.info]
+        # hard mode constraints
+        if self.n_guesses > 0: # none of these constraints apply to 1st guess
+            for i,j in enumerate(guess):
+                # constraint 1: using known overused letter
+                if j in self.overused_letters: # overused cannot contain yellows
+                    if char_pos_vals[j][i] != 2:
+                        return [self.state, self.reward, self.done, self.info]
 
+                # constraint 2: not using known correct letter
+                if np.max(pos_vals[i]) == 2:
+                    if j != self.secret_word[i]:
+                        return [self.state, self.reward, self.done, self.info]
+
+            # constraint 3: not using known yellow letter
+            for correct_char, correct_pos_val in correct_char_vals.items():
+                if np.any(np.equal(1, correct_pos_val)):
+                    n_greens = np.sum(np.equal(2, correct_pos_val))
+                    # constraint 2 handles that greens are in correct place
+                    if guess.count(correct_char) < n_greens + 1:
+                        return [self.state, self.reward, self.done, self.info]
+
+        # if the guess passes all the hard mode constraints, then it's valid
         self.n_guesses += 1
         self.state[0] = self.n_guesses
 
@@ -161,6 +196,34 @@ class WordleEnv(gym.Env):
         if self.n_guesses == self.max_attempts:
             self.done = True
 
+        # get char metadata
+        char_meta = {
+            j: (
+                # is exceeded
+                self.state[2*(self.alphabet_order[j] - self.len_alphabet)],
+                # max yellows
+                self.state[(self.alphabet_order[j] - self.len_alphabet)],
+            ) for j in guess_chars
+        }
+
+        # vals = np.zeros(self.n_letters)
+        # for i,j in enumerate(guess):
+        #     vals[i] = self.state[
+        #         (
+        #             1
+        #             + (self.alphabet_order[j] * self.n_letters)
+        #             + i
+        #         )
+        #     ]
+        # n_greens = np.sum(vals == 2)
+        # n_yellows = np.sum(vals == 1)
+
+        # for i,j in enumerate(guess):
+        #     char_pos_vals[j]
+        #     char_meta[j]
+        #     pos_vals[i]
+
+        # process the new state after the guess
         for i,j in enumerate(guess):
             if j == self.secret_word[i]:
                 self.state[
@@ -176,10 +239,7 @@ class WordleEnv(gym.Env):
                     )
                 ]
             else:
-                pass
-
-        # for j in guess:
-        #     self.incorrect_letters.append(j)
+                self.overused_letters.append(j)
 
         return [self.state, self.reward, self.done, self.info]
 
