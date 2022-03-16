@@ -125,7 +125,7 @@ class WordleEnv(gym.Env):
         self.state = self.base_obs.copy()
         self.reward = 0
         self.done = False
-        self.info = dict()
+        self.info = {'valid': True}
 
         return self.state
 
@@ -172,11 +172,13 @@ class WordleEnv(gym.Env):
                 # constraint 1: using known overused letter
                 if j in self.overused_letters: # overused cannot contain yellows
                     if char_pos_vals[j][i] != 2:
+                        self.info = {'valid': False}
                         return [self.state, self.reward, self.done, self.info]
 
                 # constraint 2: not using known correct letter
                 if np.max(pos_vals[i]) == 2:
                     if j != self.secret_word[i]:
+                        self.info = {'valid': False}
                         return [self.state, self.reward, self.done, self.info]
 
             # constraint 3: not using known yellow letter
@@ -187,12 +189,13 @@ class WordleEnv(gym.Env):
                     if guess.count(correct_char) < (
                         1 + np.sum(np.equal(2, correct_pos_val))
                     ):
+                        self.info = {'valid': False}
                         return [self.state, self.reward, self.done, self.info]
 
         # if the guess passes all the hard mode constraints, then it's valid
         self.n_guesses += 1
         self.state[0] = self.n_guesses
-        print(guess)
+
         if guess == self.secret_word:
             self.reward = self.rewards[self.n_guesses - 1]
             self.done = True
@@ -204,7 +207,7 @@ class WordleEnv(gym.Env):
         # char_meta = {
         #     j: (
         #         # is exceeded
-        #         self.state[2*(self.alphabet_order[j] - self.len_alphabet)],
+        #         self.state[(self.alphabet_order[j] - 2*self.len_alphabet)],
         #         # max yellows
         #         self.state[(self.alphabet_order[j] - self.len_alphabet)],
         #     ) for j in guess_chars
@@ -289,8 +292,13 @@ class WordleEnv(gym.Env):
             else:
                 pass # the guess was correct and processed already
 
-
+        self.info = {'valid': True}
         return [self.state, self.reward, self.done, self.info]
+
+
+    def seed(self, seed=None):
+        random.seed(seed)
+        return None
 
 
     def gt_n_poisson(self, L, n):
