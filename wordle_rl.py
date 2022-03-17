@@ -29,7 +29,7 @@ class WordleEnv(gym.Env):
 
         self.load_words(valid_words_loc)
         # construct the possible actions as integer-indexed valid words
-        self.action_words = [(i, w) for i, w in enumerate(self.words)]
+        self.action_words = {i: w for i, w in enumerate(self.words)}
 
         assert type(n_letters) is int, "number of letters must be int"
         assert type(max_attempts) is int, "number of max attempts must be int"
@@ -117,15 +117,15 @@ class WordleEnv(gym.Env):
 
         self.n_guesses = 0
         self.overused_letters = list()
-        self.non_letters = {
-            char: i for char, i in self.alphabet_order.items()
-            if char not in self.secret_word
-        }
+        self.valid_words = self.action_words.copy()
 
         self.state = self.base_obs.copy()
         self.reward = 0
         self.done = False
-        self.info = {'valid': True}
+        self.info = {
+            'valid': True,
+            'valid_words': self.valid_words,
+        }
 
         return self.state
 
@@ -172,13 +172,17 @@ class WordleEnv(gym.Env):
                 # constraint 1: using known overused letter
                 if j in self.overused_letters: # overused cannot contain yellows
                     if char_pos_vals[j][i] != 2:
-                        self.info = {'valid': False}
+                        self.info['valid'] = False
+                        self.valid_words.pop(guess, None)
+                        self.info['valid_words'] = self.valid_words
                         return [self.state, self.reward, self.done, self.info]
 
                 # constraint 2: not using known correct letter
                 if np.max(pos_vals[i]) == 2:
                     if j != self.secret_word[i]:
-                        self.info = {'valid': False}
+                        self.info['valid'] = False
+                        self.valid_words.pop(guess, None)
+                        self.info['valid_words'] = self.valid_words
                         return [self.state, self.reward, self.done, self.info]
 
             # constraint 3: not using known yellow letter
@@ -189,7 +193,9 @@ class WordleEnv(gym.Env):
                     if guess.count(correct_char) < (
                         1 + np.sum(np.equal(2, correct_pos_val))
                     ):
-                        self.info = {'valid': False}
+                        self.info['valid'] = False
+                        self.valid_words.pop(guess, None)
+                        self.info['valid_words'] = self.valid_words
                         return [self.state, self.reward, self.done, self.info]
 
         # if the guess passes all the hard mode constraints, then it's valid
@@ -292,7 +298,53 @@ class WordleEnv(gym.Env):
             else:
                 pass # the guess was correct and processed already
 
-        self.info = {'valid': True}
+        # get current positions' status
+        pos_vals = {
+            i: self.state[(1 + i):(-2 * self.len_alphabet):self.n_letters]
+            for i in range(self.n_letters)
+        }
+        # get current individual letter status of the secret word
+        correct_char_vals = {
+            j: self.state[
+                (1 + self.n_letters * self.alphabet_order[j]):
+                (1 + self.n_letters * (self.alphabet_order[j] + 1))
+            ]
+            for j in self.correct_chars
+        }
+
+        self.info['valid'] = True
+        # prune a list of valid words for use with random selection agent
+        for i, pos_val in pos_vals.items():
+            to_pop = list()
+            # constraint 1: must use known correct letter in correct place
+            if np.max(pos_val) == 2:
+                l = list(string.ascii_lowercase)[np.argwhere(pos_val == 2)[0,0]]
+                for action, word in self.valid_words.items():
+                    if word[i] != l:
+                        to_pop.append(action)
+                for action in to_pop:
+                    self.valid_words.pop(action, None)
+            else:
+                # constraint 2: must not use known incorrect letter
+                for j in self.overused_letters:
+                    for action, word in self.valid_words.items():
+                        if word[i] == j:
+                            to_pop.append(action)
+                    for action in to_pop:
+                        self.valid_words.pop(action, None)
+        # constraint 3: not using known yellow letter
+        for correct_char, correct_pos_val in correct_char_vals.items():
+            to_pop = list()
+            if np.any(np.equal(1, correct_pos_val)):
+                for action, word in self.valid_words.items():
+                    if word.count(correct_char) < (
+                        1 + np.sum(np.equal(2, correct_pos_val))
+                    ):
+                        to_pop.append(action)
+                for action in to_pop:
+                    self.valid_words.pop(action, None)
+        self.info['valid_words'] = self.valid_words
+
         return [self.state, self.reward, self.done, self.info]
 
 
