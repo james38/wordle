@@ -36,9 +36,12 @@ class Wordler(object):
         C=8,
         batch_size=128,
         max_experience=1000000,
+        clip_val=3,
     ):
 
         self.model = Model().to(self.device).float()
+        for p in self.model.parameters():
+            p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
         self.loss_fx = nn.MSELoss() # nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(
@@ -110,7 +113,6 @@ class Wordler(object):
                     batch[:,:self.n_inputs], device=self.device
                 )
 
-                # y_preds = self.model(input).sum(dim=1, keepdims=True)
                 y_preds = torch.gather(
                     self.model(input),
                     1,
@@ -120,17 +122,6 @@ class Wordler(object):
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                total_norm = torch.norm(
-                    torch.stack(
-                        [
-                            torch.norm(p.grad.detach(), 2).to(device)
-                            for p in self.model.parameters()
-                        ]
-                    ),
-                    2
-                )
-                print("total norm", round(total_norm.item(), 1))
-                nn.utils.clip_grad_norm_(self.model.parameters(), 1000000000)
                 self.optimizer.step()
 
                 if (self.n_episodes % C) == 0:
@@ -178,7 +169,8 @@ class Wordler(object):
         if np.random.random() > self.epsilon:
             action, _ = self.select_action(model, input)
         else:
-            action = np.random.randint(self.env.action_space.n)
+            # action = np.random.randint(self.env.action_space.n)
+            action = np.random.choice(list(self.env.info['valid_words'].keys()))
 
         return action
 
@@ -217,9 +209,15 @@ class Wordler(object):
 class Model(nn.Module):
     def __init__(
         self, n_inputs=183,
-        hidden_layer_1=256,
-        hidden_layer_2=512,
-        hidden_layer_3=256,
+        # hidden_layer_1=256,
+        # hidden_layer_2=512,
+        # hidden_layer_3=256,
+        hidden_layer_1=128,
+        hidden_layer_2=64,
+        hidden_layer_3=16,
+        hidden_layer_4=16,
+        hidden_layer_5=64,
+        hidden_layer_6=128,
         n_outputs=12972,
     ):
         super(Model, self).__init__()
@@ -230,7 +228,13 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_layer_2, hidden_layer_3),
             nn.ReLU(),
-            nn.Linear(hidden_layer_3, n_outputs),
+            nn.Linear(hidden_layer_3, hidden_layer_4),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_4, hidden_layer_5),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_5, hidden_layer_6),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_6, n_outputs),
         )
 
 
@@ -238,7 +242,7 @@ class Model(nn.Module):
         return self.net(x)
 
 
-def main(device, max_episodes=1000, C=8, batch_size=128, verbose=False):
+def main(device, max_episodes=100000, C=8, batch_size=128, verbose=False):
     agent = Wordler(device, verbose)
     agent.solve(
         max_episodes=max_episodes,
