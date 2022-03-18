@@ -4,13 +4,9 @@ import random
 import string
 
 import numpy as np
-import pandas as pd
 
 import gym
-from gym import spaces, utils, wrappers
-
-import torch
-import torch.nn as nn
+from gym import spaces
 
 
 class WordleEnv(gym.Env):
@@ -71,7 +67,7 @@ class WordleEnv(gym.Env):
             1
             + self.len_alphabet * self.n_letters
             + 2 * self.len_alphabet
-        )
+        ).astype(np.int8)
 
         # required variable for environment
         self.action_space = spaces.Discrete(len(self.words))
