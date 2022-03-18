@@ -20,8 +20,8 @@ class Wordler(object):
 
         self.n_inputs = 183
 
-        self.alpha = 0.03
-        self.epsilon = 0.99
+        self.alpha = 0.0003
+        self.epsilon = 0.999
         self.epsilon_decay = 0.999
         self.min_epsilon = 0.02
         self.gamma = 0.999
@@ -34,14 +34,14 @@ class Wordler(object):
         self,
         max_episodes=1,
         C=8,
-        batch_size=128,
+        batch_size=64,
         max_experience=1000000,
         clip_val=3,
     ):
 
         self.model = Model().to(self.device).float()
-        for p in self.model.parameters():
-            p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
+        # for p in self.model.parameters():
+        #     p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
         self.loss_fx = nn.MSELoss() # nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(
@@ -122,6 +122,8 @@ class Wordler(object):
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                for param in self.model.parameters():
+                    param.grad.data.clamp_(-clip_val, clip_val)
                 self.optimizer.step()
 
                 if (self.n_episodes % C) == 0:
@@ -242,7 +244,40 @@ class Model(nn.Module):
         return self.net(x)
 
 
-def main(device, max_episodes=100000, C=8, batch_size=128, verbose=False):
+def test_model(model_dir, episodes=100, verbose=True):
+    model = torch.load(model_dir)
+
+    agent = Wordler(device, verbose)
+
+    env = WordleEnv()
+
+    def run_episode(env, agent, model):
+        state = env.reset()
+        print("secret word: ", env.secret_word)
+        reward = 0
+        done = False
+        while not done:
+            info = {'valid': False}
+            while not info['valid']:
+                action, a_val = agent.select_action(model, state)
+                action = action.item()
+                print(action, a_val)
+                state, R, done, info = env.step(action)
+            print(env.action_words[action])
+            print(R)
+            reward += R
+
+        print(f"reward: {round(reward, 2)}")
+        return reward
+
+    history = [run_episode(env, agent, model) for _ in range(episodes)]
+
+    print(f"Average reward: {round(sum(history) / len(history), 3)}")
+
+    return history
+
+
+def main(device, max_episodes=250, C=8, batch_size=64, verbose=False):
     agent = Wordler(device, verbose)
     agent.solve(
         max_episodes=max_episodes,
@@ -252,8 +287,7 @@ def main(device, max_episodes=100000, C=8, batch_size=128, verbose=False):
 
     agent.create_r_per_ep_fig()
 
-    with open('./model_main_20220316', 'wb') as f:
-        pickle.dump(agent, f)
+    torch.save(agent.model, './model_main_20220318')
 
     return None
 
@@ -261,3 +295,4 @@ def main(device, max_episodes=100000, C=8, batch_size=128, verbose=False):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     main(device=device, verbose=True)
+    # test_model(model_dir='./model_main_20220318', episodes=100)
