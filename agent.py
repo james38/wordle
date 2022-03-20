@@ -6,7 +6,7 @@ import gym
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn.functional as F
 
 from wordle_rl import WordleEnv
 
@@ -40,8 +40,8 @@ class Wordler(object):
     ):
 
         self.model = Model().to(self.device).float()
-        # for p in self.model.parameters():
-        #     p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
+        for p in self.model.parameters():
+            p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
         self.loss_fx = nn.MSELoss() # nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(
@@ -51,7 +51,6 @@ class Wordler(object):
 
         self.initialize_replay_memory(n=max_experience)
 
-        self.n_t = 0 # replay memory index
         self.n_episodes = 0
         overall_rewards = list()
         is_solved = False
@@ -90,7 +89,11 @@ class Wordler(object):
                 )
                 batch = self.replay_memory[batch_inds,:]
 
-                y_targets = torch.zeros(batch_size, 1, device=self.device)
+                y_targets = torch.full(
+                    (2 * batch_size, 1),
+                    -1e-4,
+                    device=self.device
+                )
                 for i,j in enumerate(batch_inds):
                     if self.replay_memory[j,-1]:
                         y_targets[i,0] = self.replay_memory[j,-2]
@@ -118,12 +121,28 @@ class Wordler(object):
                     1,
                     torch.tensor(batch[:,-3].astype(int)).view(-1,1).to(device)
                 )
+
+                valid_actions = set(self.env.info['valid_words'].keys())
+                invalid_actions = [
+                    w for w in set(self.env.action_words.keys())
+                    if w not in valid_actions
+                ]
+                invalid_action_inds = np.random.choice(
+                    invalid_actions, size=batch_size
+                )
+
+                state_input = torch.tensor(
+                    self.state,
+                    device=self.device
+                ).float()
+                state_logits = self.model(state_input)
+                y_preds_invalid = state_logits[invalid_action_inds]
+
+                y_preds = torch.cat((y_preds, y_preds_invalid.view(-1,1)))
                 loss = self.loss_fx(y_preds, y_targets)
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                for param in self.model.parameters():
-                    param.grad.data.clamp_(-clip_val, clip_val)
                 self.optimizer.step()
 
                 if (self.n_episodes % C) == 0:
@@ -164,6 +183,7 @@ class Wordler(object):
                 2 * self.n_inputs + 3 # two states, one action, reward, done
             )
         )
+        self.n_t = 0
         return None
 
 
@@ -182,6 +202,12 @@ class Wordler(object):
             input = torch.tensor(input.astype(np.float32)).to(self.device)
 
         out = model(input)
+        valid_actions = set(self.env.info['valid_words'].keys())
+        invalid_actions = [
+            w for w in set(self.env.action_words.keys())
+            if w not in valid_actions
+        ]
+        out[invalid_actions] = float("-inf")
         action = torch.argmax(out)
         best_action_value = out[action]
 
@@ -249,7 +275,7 @@ def test_model(model_dir, episodes=100, verbose=True):
 
     agent = Wordler(device, verbose)
 
-    env = WordleEnv()
+    agent.env = WordleEnv()
 
     def run_episode(env, agent, model):
         state = env.reset()
@@ -257,27 +283,24 @@ def test_model(model_dir, episodes=100, verbose=True):
         reward = 0
         done = False
         while not done:
-            info = {'valid': False}
-            while not info['valid']:
-                action, a_val = agent.select_action(model, state)
-                action = action.item()
-                print(action, a_val)
-                state, R, done, info = env.step(action)
-            print(env.action_words[action])
-            print(R)
+            action, a_val = agent.select_action(model, state)
+            action = action.item()
+            print(env.action_words[action], round(a_val.item(), 3))
+            state, R, done, info = env.step(action)
+            print("guess: ", env.action_words[action])
             reward += R
 
         print(f"reward: {round(reward, 2)}")
         return reward
 
-    history = [run_episode(env, agent, model) for _ in range(episodes)]
+    history = [run_episode(agent.env, agent, model) for _ in range(episodes)]
 
     print(f"Average reward: {round(sum(history) / len(history), 3)}")
 
     return history
 
 
-def main(device, max_episodes=250, C=8, batch_size=64, verbose=False):
+def main(device, max_episodes=10000, C=8, batch_size=64, verbose=False):
     agent = Wordler(device, verbose)
     agent.solve(
         max_episodes=max_episodes,
@@ -287,7 +310,7 @@ def main(device, max_episodes=250, C=8, batch_size=64, verbose=False):
 
     agent.create_r_per_ep_fig()
 
-    torch.save(agent.model, './model_main_20220318')
+    torch.save(agent.model, './model_main_20220320')
 
     return None
 
