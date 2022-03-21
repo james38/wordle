@@ -20,6 +20,7 @@ class WordleEnv(gym.Env):
         max_attempts=6,
         L=3.4,
         min_guesses=True,
+        config=None,
     ):
         self.seed()
 
@@ -54,7 +55,7 @@ class WordleEnv(gym.Env):
         self.observation_space = spaces.Tuple(
             (
                 spaces.MultiDiscrete(
-                    [self.max_attempts]
+                    [1 + self.max_attempts]
                     + self.len_alphabet * [3] * self.n_letters
                 ),
                 spaces.MultiBinary(self.len_alphabet),
@@ -63,6 +64,24 @@ class WordleEnv(gym.Env):
                 ),
             )
         )
+        # self.observation_space = spaces.Dict(
+        #     {
+        #         "action_mask": spaces.MultiBinary(len(self.action_words.keys())),
+        #         "avail_actions": spaces.MultiDiscrete(len(self.action_words.keys())),
+        #         "state": spaces.Dict(
+        #             {
+        #                 "letters": spaces.MultiDiscrete(
+        #                     [self.max_attempts]
+        #                     + self.len_alphabet * [3] * self.n_letters
+        #                 ),
+        #                 "overused_letters": spaces.MultiBinary(self.len_alphabet),
+        #                 "max_yellows": spaces.MultiDiscrete(
+        #                     self.len_alphabet * [1 + int(self.n_letters / 2)]
+        #                 ),
+        #             }
+        #         ),
+        #     }
+        # )
         self.base_obs = np.zeros(
             1
             + self.len_alphabet * self.n_letters
@@ -123,6 +142,18 @@ class WordleEnv(gym.Env):
             'valid_words': self.valid_words,
         }
 
+        # return {
+        #     'action_mask': np.ones(
+        #         len(self.action_words.keys()),
+        #         dtype=np.int8
+        #     ),
+        #     'avail_actions': np.array(list(self.action_words.keys())),
+        #     'state': (
+        #         self.state[:-2*self.len_alphabet],
+        #         self.state[-2*self.len_alphabet:-self.len_alphabet],
+        #         self.state[-self.len_alphabet:]
+        #     )
+        # }
         return (
             self.state[:-2*self.len_alphabet],
             self.state[-2*self.len_alphabet:-self.len_alphabet],
@@ -175,11 +206,33 @@ class WordleEnv(gym.Env):
                         self.info['valid'] = False
                         self.valid_words.pop(guess, None)
                         self.info['valid_words'] = self.valid_words
-                        return [(
-                            self.state[:-2*self.len_alphabet],
-                            self.state[-2*self.len_alphabet:-self.len_alphabet],
-                            self.state[-self.len_alphabet:]
-                        ), -1e-5, self.done, self.info]
+                        # action_mask = np.zeros(
+                        #     len(self.valid_words),
+                        #     dtype=np.int8
+                        # )
+                        # action_mask[list(self.valid_words)] = 1
+                        # return {
+                        #     'action_mask': action_mask,
+                        #     'avail_actions': np.array(list(self.valid_words.keys())),
+                        #     'state': [
+                        # (
+                        #     self.state[:-2*self.len_alphabet],
+                        #     self.state[-2*self.len_alphabet:-self.len_alphabet],
+                        #     self.state[-self.len_alphabet:]
+                        # ), -1e-5, self.done, self.info
+                        # ],
+                        # }
+                        self.n_guesses += 1
+                        self.state[0] = self.n_guesses
+                        if self.n_guesses == self.max_attempts:
+                            self.done = True
+                        return [
+                            (
+                                self.state[:-2*self.len_alphabet],
+                                self.state[-2*self.len_alphabet:-self.len_alphabet],
+                                self.state[-self.len_alphabet:]
+                            ), -1e-5, self.done, self.info
+                        ]
 
                 # constraint 2: not using known correct letter
                 if np.max(pos_vals[i]) == 2:
@@ -187,11 +240,33 @@ class WordleEnv(gym.Env):
                         self.info['valid'] = False
                         self.valid_words.pop(guess, None)
                         self.info['valid_words'] = self.valid_words
-                        return [(
-                            self.state[:-2*self.len_alphabet],
-                            self.state[-2*self.len_alphabet:-self.len_alphabet],
-                            self.state[-self.len_alphabet:]
-                        ), -1e-5, self.done, self.info]
+                        # action_mask = np.zeros(
+                        #     len(self.valid_words),
+                        #     dtype=np.int8
+                        # )
+                        # action_mask[list(self.valid_words)] = 1
+                        # return {
+                        #     'action_mask': action_mask,
+                        #     'avail_actions': np.array(list(self.valid_words.keys())),
+                        #     'state': [
+                        # (
+                        #     self.state[:-2*self.len_alphabet],
+                        #     self.state[-2*self.len_alphabet:-self.len_alphabet],
+                        #     self.state[-self.len_alphabet:]
+                        # ), -1e-5, self.done, self.info
+                        # ],
+                        # }
+                        self.n_guesses += 1
+                        self.state[0] = self.n_guesses
+                        if self.n_guesses == self.max_attempts:
+                            self.done = True
+                        return [
+                            (
+                                self.state[:-2*self.len_alphabet],
+                                self.state[-2*self.len_alphabet:-self.len_alphabet],
+                                self.state[-self.len_alphabet:]
+                            ), -1e-5, self.done, self.info
+                        ]
 
             # constraint 3: not using known yellow letter
             #  note: it is allowable to guess a yellow again in the same place
@@ -204,11 +279,33 @@ class WordleEnv(gym.Env):
                         self.info['valid'] = False
                         self.valid_words.pop(guess, None)
                         self.info['valid_words'] = self.valid_words
-                        return [(
-                            self.state[:-2*self.len_alphabet],
-                            self.state[-2*self.len_alphabet:-self.len_alphabet],
-                            self.state[-self.len_alphabet:]
-                        ), -1e-5, self.done, self.info]
+                        # action_mask = np.zeros(
+                        #     len(self.valid_words),
+                        #     dtype=np.int8
+                        # )
+                        # action_mask[list(self.valid_words)] = 1
+                        # return {
+                        #     'action_mask': action_mask,
+                        #     'avail_actions': np.array(list(self.valid_words.keys())),
+                        #     'state': [
+                        # (
+                        #     self.state[:-2*self.len_alphabet],
+                        #     self.state[-2*self.len_alphabet:-self.len_alphabet],
+                        #     self.state[-self.len_alphabet:]
+                        # ), -1e-5, self.done, self.info
+                        # ],
+                        # }
+                        self.n_guesses += 1
+                        self.state[0] = self.n_guesses
+                        if self.n_guesses == self.max_attempts:
+                            self.done = True
+                        return [
+                            (
+                                self.state[:-2*self.len_alphabet],
+                                self.state[-2*self.len_alphabet:-self.len_alphabet],
+                                self.state[-self.len_alphabet:]
+                            ), -1e-5, self.done, self.info
+                        ]
 
         # if the guess passes all the hard mode constraints, then it's valid
         self.n_guesses += 1
@@ -357,11 +454,31 @@ class WordleEnv(gym.Env):
                     self.valid_words.pop(action, None)
         self.info['valid_words'] = self.valid_words
 
-        return [(
-            self.state[:-2*self.len_alphabet],
-            self.state[-2*self.len_alphabet:-self.len_alphabet],
-            self.state[-self.len_alphabet:]
-        ), self.reward, self.done, self.info]
+        # action_mask = np.zeros(
+        #     len(self.valid_words),
+        #     dtype=np.int8
+        # )
+        # action_mask[list(self.valid_words)] = 1
+        # return {
+        #     'action_mask': action_mask,
+        #     'avail_actions': np.array(list(self.valid_words.keys())),
+        #     'state': [
+        # (
+        #     self.state[:-2*self.len_alphabet],
+        #     self.state[-2*self.len_alphabet:-self.len_alphabet],
+        #     self.state[-self.len_alphabet:]
+        # ), self.reward, self.done, self.info
+        # ],
+        # }
+
+        return [
+            (
+                self.state[:-2*self.len_alphabet],
+                self.state[-2*self.len_alphabet:-self.len_alphabet],
+                self.state[-self.len_alphabet:]
+            ),
+            self.reward, self.done, self.info
+        ]
 
 
     def seed(self, seed=None):
