@@ -135,12 +135,13 @@ class Wordler(object):
                 )
 
                 valid_actions = self.env.info['valid_words'].keys()
-                invalid_actions = [
+                invalid_actions = {
                     w for w in self.env.action_words.keys()
                     if w not in valid_actions
-                ]
+                }
+                invalid_actions.update(self.guessed)
                 invalid_action_inds = np.random.choice(
-                    invalid_actions, size=batch_size
+                    list(invalid_actions), size=batch_size
                 )
 
                 state_input = torch.tensor(
@@ -206,22 +207,27 @@ class Wordler(object):
         else:
             # action = np.random.randint(self.env.action_space.n)
             valid_actions = self.env.info['valid_words'].keys()
-            valid_actions = [a for a in valid_actions if a not in self.guessed]
             action = np.random.choice(valid_actions)
 
         return action
 
 
-    def select_action(self, model, input):
+    def select_action(self, model, input, exploit=False):
         if type(input) is np.ndarray:
             input = torch.tensor(input.astype(np.float32)).to(self.device)
 
         out = model(input)
         valid_actions = self.env.info['valid_words'].keys()
-        invalid_actions = [
-            w for w in self.env.action_words.keys()
-            if (w not in valid_actions) or (w in self.guessed)
-        ]
+        if exploit:
+            invalid_actions = [
+                w for w in self.env.action_words.keys()
+                if (w not in valid_actions) or (w in self.guessed)
+            ]
+        else:
+            invalid_actions = [
+                w for w in self.env.action_words.keys()
+                if (w not in valid_actions)
+            ]
         out[invalid_actions] = float("-inf")
         action = torch.argmax(out)
         best_action_value = out[action]
@@ -309,7 +315,7 @@ def test_model(model_dir, episodes=100, verbose=True):
         reward = 0
         done = False
         while not done:
-            action, a_val = agent.select_action(model, state)
+            action, a_val = agent.select_action(model, state, exploit=True)
             action = action.item()
             agent.guessed.add(action)
             print(env.action_words[action], round(a_val.item(), 3))
