@@ -23,7 +23,7 @@ class Wordler(object):
 
         self.alpha = 0.0003
         self.epsilon = 0.999
-        self.epsilon_decay = 0.999
+        self.epsilon_decay = 0.99998
         self.min_epsilon = 0.02
         self.gamma = 0.999
 
@@ -39,6 +39,8 @@ class Wordler(object):
         batch_size=64,
         max_experience=1000000,
         clip_val=3,
+        lr_drop_at=0.9,
+        lr_drop_rate=0.1,
     ):
 
         if model_loc is not None:
@@ -60,6 +62,10 @@ class Wordler(object):
         overall_rewards = list()
         is_solved = False
         while not is_solved:
+            if self.n_episodes == int(lr_drop_at * max_episodes):
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] *= lr_drop_rate
+                self.min_epsilon *= lr_drop_rate
             self.state = self.env.reset()
             self.guessed = set()
             episode_R = 0
@@ -245,7 +251,9 @@ class Wordler(object):
         ax.plot(np.arange(n_rolling), rolling)
 
         plt.xticks(
-            np.arange(window, n_rolling, max(1, int(round(n_rolling / 10))))
+            np.arange(
+                window, n_rolling + window, max(1, int(round(n_rolling / 10)))
+            )
         )
         plt.savefig(out_path)
         return None
