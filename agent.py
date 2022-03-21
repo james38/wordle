@@ -1,5 +1,6 @@
 from copy import deepcopy
 import pickle
+import datetime as dt
 import numpy as np
 import matplotlib.pyplot as plt
 import gym
@@ -32,6 +33,7 @@ class Wordler(object):
 
     def solve(
         self,
+        model_loc=None,
         max_episodes=1,
         C=8,
         batch_size=64,
@@ -39,11 +41,14 @@ class Wordler(object):
         clip_val=3,
     ):
 
-        self.model = Model().to(self.device).float()
+        if model_loc is not None:
+            self.model = torch.load(model_loc)
+        else:
+            self.model = Model().to(self.device).float()
         for p in self.model.parameters():
             p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
-        self.loss_fx = nn.MSELoss() # nn.CrossEntropyLoss()
+        self.loss_fx = nn.MSELoss()
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.alpha,
@@ -56,10 +61,10 @@ class Wordler(object):
         is_solved = False
         while not is_solved:
             self.state = self.env.reset()
+            self.guessed = set()
             episode_R = 0
             is_terminal = False
             while not is_terminal:
-                # action = self.np_rng.choice(self.env.action_space.n)
                 info = {'valid': False}
                 while not info['valid']:
                     action = self.epsilon_greedy_action_selection(
@@ -70,6 +75,7 @@ class Wordler(object):
                         action = action.item()
                     s_prime, R, is_terminal, info = self.env.step(action)
 
+                self.guessed.add(action)
                 self.epsilon *= self.epsilon_decay
                 self.epsilon = max(self.min_epsilon, self.epsilon)
 
@@ -122,9 +128,9 @@ class Wordler(object):
                     torch.tensor(batch[:,-3].astype(int)).view(-1,1).to(device)
                 )
 
-                valid_actions = set(self.env.info['valid_words'].keys())
+                valid_actions = self.env.info['valid_words'].keys()
                 invalid_actions = [
-                    w for w in set(self.env.action_words.keys())
+                    w for w in self.env.action_words.keys()
                     if w not in valid_actions
                 ]
                 invalid_action_inds = np.random.choice(
@@ -145,30 +151,31 @@ class Wordler(object):
                 loss.backward()
                 self.optimizer.step()
 
-                if (self.n_episodes % C) == 0:
-                    self.target_model = deepcopy(self.model)
-
                 self.state = s_prime
 
             if self.verbose:
                 print("guesses", self.env.n_guesses)
                 print("reward", round(episode_R, 2))
-            # print(self.env.secret_word)
-            # print(self.state)
-            # print(self.env.reward)
-            if self.verbose and (self.n_episodes % 10 == 0): print(self.n_t)
-            overall_rewards.append(episode_R)
-            if self.verbose: print(
-                f"{self.n_episodes}, mean of last 100 episode rewards",
-                np.mean(overall_rewards[-100:]).round(3)
-            )
 
+            overall_rewards.append(episode_R)
+            if self.verbose and (self.n_episodes % 10 == 0):
+                print("total guesses: ", self.n_t)
+                print(
+                    f"episode {self.n_episodes}, last 100 episode mean reward",
+                    np.mean(overall_rewards[-100:]).round(3)
+                )
+
+            if (self.n_episodes % C) == 0:
+                self.target_model = deepcopy(self.model)
             self.n_episodes += 1
-            q_val_converged = False
-            if (q_val_converged):
-                is_solved = True
-            elif self.n_episodes == max_episodes:
+            # q_val_converged = False
+            # if (q_val_converged):
+            #     is_solved = True
+            if self.n_episodes == max_episodes:
                 break
+
+        fsufx = dt.datetime.now().strftime("%Y%m%d.%H.%M.%S")
+        torch.save(self.model, f'./model_{fsufx}')
 
         self.rewards = overall_rewards
 
@@ -192,7 +199,9 @@ class Wordler(object):
             action, _ = self.select_action(model, input)
         else:
             # action = np.random.randint(self.env.action_space.n)
-            action = np.random.choice(list(self.env.info['valid_words'].keys()))
+            valid_actions = self.env.info['valid_words'].keys()
+            valid_actions = [a for a in valid_actions if a not in self.guessed]
+            action = np.random.choice(valid_actions)
 
         return action
 
@@ -202,10 +211,10 @@ class Wordler(object):
             input = torch.tensor(input.astype(np.float32)).to(self.device)
 
         out = model(input)
-        valid_actions = set(self.env.info['valid_words'].keys())
+        valid_actions = self.env.info['valid_words'].keys()
         invalid_actions = [
-            w for w in set(self.env.action_words.keys())
-            if w not in valid_actions
+            w for w in self.env.action_words.keys()
+            if (w not in valid_actions) or (w in self.guessed)
         ]
         out[invalid_actions] = float("-inf")
         action = torch.argmax(out)
@@ -218,17 +227,25 @@ class Wordler(object):
         self,
         out_path='./training_reward_per_episode.png',
         title_suffix='',
+        window=100,
     ):
         fig, ax = plt.subplots()
 
         ax.set_xlabel('Episode Number')
         ax.set_ylabel('Reward')
-        ax.set_title(f'Agent training reward per episode{title_suffix}')
+        ax.set_title(f'Agent training mean last {window} rewards{title_suffix}')
 
-        ax.plot(np.arange(self.n_episodes), self.rewards)
+        from numpy.lib.stride_tricks import sliding_window_view
+        window = min(window, len(self.rewards))
+        rolling = sliding_window_view(
+            np.array(self.rewards), window_shape=window
+        ).mean(axis=1)
+        n_rolling = rolling.shape[0]
+
+        ax.plot(np.arange(n_rolling), rolling)
 
         plt.xticks(
-            np.arange(0, self.n_episodes, int(round(self.n_episodes / 10)))
+            np.arange(window, n_rolling, max(1, int(round(n_rolling / 10))))
         )
         plt.savefig(out_path)
         return None
@@ -280,11 +297,13 @@ def test_model(model_dir, episodes=100, verbose=True):
     def run_episode(env, agent, model):
         state = env.reset()
         print("secret word: ", env.secret_word)
+        agent.guessed = set()
         reward = 0
         done = False
         while not done:
             action, a_val = agent.select_action(model, state)
             action = action.item()
+            agent.guessed.add(action)
             print(env.action_words[action], round(a_val.item(), 3))
             state, R, done, info = env.step(action)
             print("guess: ", env.action_words[action])
@@ -300,9 +319,17 @@ def test_model(model_dir, episodes=100, verbose=True):
     return history
 
 
-def main(device, max_episodes=10000, C=8, batch_size=64, verbose=False):
+def main(
+    device,
+    model_loc=None,
+    max_episodes=100,
+    C=8,
+    batch_size=64,
+    verbose=False,
+):
     agent = Wordler(device, verbose)
     agent.solve(
+        model_loc=model_loc,
         max_episodes=max_episodes,
         C=C,
         batch_size=batch_size,
@@ -310,12 +337,10 @@ def main(device, max_episodes=10000, C=8, batch_size=64, verbose=False):
 
     agent.create_r_per_ep_fig()
 
-    torch.save(agent.model, './model_main_20220320')
-
     return None
 
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    main(device=device, verbose=True)
-    # test_model(model_dir='./model_main_20220318', episodes=100)
+    main(model_loc=None, max_episodes=50000, device=device, verbose=True)
+    # test_model(model_dir='./model_main_20220320', episodes=100)
