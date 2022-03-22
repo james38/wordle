@@ -78,11 +78,13 @@ class Wordler(object):
                         self.alpha * (1 + self.n_episodes) / (warmup * C_init)
                     )
                 C = max(2, int((1 + self.n_episodes) / warmup))
+
             self.state = self.env.reset()
             self.guessed = set()
             episode_R = 0
             is_terminal = False
             while not is_terminal:
+                state_prior = self.state.copy()
                 info = {'valid': False}
                 while not info['valid']:
                     action = self.epsilon_greedy_action_selection(
@@ -99,17 +101,25 @@ class Wordler(object):
 
                 episode_R += R
 
-                self.replay_memory[self.n_t,:self.n_inputs] = self.state
+                self.replay_memory[self.n_t,:self.n_inputs] = state_prior
                 self.replay_memory[self.n_t,self.n_inputs:-3] = s_prime
                 self.replay_memory[self.n_t,-3] = action
                 self.replay_memory[self.n_t,-2] = R
                 self.replay_memory[self.n_t,-1] = 1 if is_terminal else 0
                 self.n_t += 1
 
+                probs = (
+                    np.minimum(0.8, self.replay_memory[:self.n_t,-2])
+                    + (
+                        1
+                        + np.log(1 + self.n_t)
+                        + self.replay_memory[:self.n_t,0]
+                    ) / 100
+                )
                 batch_inds = np.random.choice(
                     self.n_t,
                     size=batch_size,
-                    # p=(probs / np.sum(probs)),
+                    p=(probs / np.sum(probs)),
                 )
                 batch = self.replay_memory[batch_inds,:]
 
@@ -157,7 +167,7 @@ class Wordler(object):
                 )
 
                 state_input = torch.tensor(
-                    self.state,
+                    state_prior,
                     device=self.device
                 ).float()
                 state_logits = self.model(self.input_scaling(state_input))
@@ -169,8 +179,9 @@ class Wordler(object):
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-
-                self.state = s_prime
+                # for some reason, the environment's step method is already
+                #  setting the agent's self.state to the output state of step
+                # self.state = s_prime
 
             if self.verbose:
                 print("guesses", self.env.n_guesses)
