@@ -31,9 +31,11 @@ class Wordler(object):
     def solve(
         self,
         model_dir=None,
+        teacher_model_dir=None,
         max_episodes=1,
         C=8,
         batch_size=64,
+        invalid_batch_size=128,
         max_experience=1000000,
         clip_val=2,
         warmup=2,
@@ -48,6 +50,8 @@ class Wordler(object):
             self.model = torch.load(model_dir)
         else:
             self.model = Model().to(self.device).float()
+        if teacher_model_dir is not None:
+            self.teacher_model = torch.load(teacher_model_dir)
         for p in self.model.parameters():
             p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
@@ -68,6 +72,7 @@ class Wordler(object):
         )
 
         self.n_episodes = 0
+        n_sols = len(self.env.poss_solutions)
         overall_rewards = list()
         is_solved = False
         while not is_solved:
@@ -87,7 +92,9 @@ class Wordler(object):
                     )
                 C = max(2, int((1 + self.n_episodes) / warmup))
 
-            self.state = self.env.reset()
+            self.state = self.env.reset(
+                self.env.poss_solutions[self.n_episodes % n_sols]
+            )
             self.guessed = set()
             episode_R = 0
             is_terminal = False
@@ -101,14 +108,18 @@ class Wordler(object):
                     }
                     invalid_actions.update(self.guessed)
                     invalid_action_inds = np.random.choice(
-                        list(invalid_actions), size=batch_size
+                        list(invalid_actions), size=invalid_batch_size
                     )
+                else:
+                    invalid_actions = list()
+                self.replay_invalid_words.append(invalid_actions)
 
                 info = {'valid': False}
                 while not info['valid']:
                     action = self.epsilon_greedy_action_selection(
                         self.model,
                         self.state,
+                        invalid_actions,
                     )
                     s_prime, R, is_terminal, info = self.env.step(action)
 
@@ -138,29 +149,41 @@ class Wordler(object):
                     p=(probs / np.sum(probs)),
                 )
                 batch = self.replay_memory[batch_inds,:]
+                replay_batch_invalid_words = [
+                    self.replay_invalid_words[i] for i in batch_inds
+                ]
 
-                y_targets = torch.zeros((2 * batch_size, 1), device=self.device)
-                for i,j in enumerate(batch_inds):
-                    if self.replay_memory[j,-1]:
-                        y_targets[i,0] = self.replay_memory[j,-2]
-                    else:
-                        y_targets[i,0] = (
-                            (
-                                self.replay_memory[j,-2]
-                                + self.gamma *
-                                self.select_action(
-                                    self.target_model,
-                                    self.replay_memory[j,self.n_inputs:-3],
-                                )[1]
-                            )
-                        )
-
-                input = torch.zeros(
-                    batch_size, self.n_inputs, device=self.device
+                y_targets = torch.zeros(
+                    (batch_size + invalid_batch_size, 1),
+                    device=self.device
                 )
-                input[:,:] = torch.tensor(
+
+                # numbers chosen so that influence will exponentially decay
+                #  plus a bit of linear decay to hit 0 at roughly halfway
+                if teacher_model_dir is not None:
+                    teacher_influence = max(0, np.exp(
+                        -5 * (1 + self.n_episodes) / max_episodes
+                    ) - 0.164 * (self.n_episodes / max_episodes))
+
+                Q_prime = self.gamma * self.select_action(
+                    self.target_model,
+                    batch[:,self.n_inputs:-3],
+                    replay_batch_invalid_words,
+                )[1].cpu().detach().numpy().reshape(-1)
+
+                Q_vals = np.where(
+                    batch[:,-1] == 1,
+                    batch[:,-2],
+                    batch[:,-2] + Q_prime
+                )
+
+                y_targets[:batch_size, 0] = torch.tensor(
+                    Q_vals, device=self.device
+                ).float()
+
+                input = torch.tensor(
                     batch[:,:self.n_inputs], device=self.device
-                )
+                ).float()
 
                 y_preds = torch.gather(
                     self.model(self.input_scaling(input)),
@@ -179,6 +202,7 @@ class Wordler(object):
                     y_preds = torch.cat((y_preds, y_preds_invalid.view(-1,1)))
                 else:
                     y_targets = y_targets[:batch_size,:]
+
                 loss = self.loss_fx(y_preds, y_targets)
 
                 self.optimizer.zero_grad()
@@ -231,39 +255,47 @@ class Wordler(object):
             )
         )
         self.n_t = 0
+        self.replay_invalid_words = list()
         return None
 
 
-    def epsilon_greedy_action_selection(self, model, input):
+    def epsilon_greedy_action_selection(self, model, input, invalid_actions):
         if np.random.random() > self.epsilon:
-            action, _ = self.select_action(model, input)
+            action, _ = self.select_action(model, input, invalid_actions)
         else:
-            # action = np.random.randint(self.env.action_space.n)
             valid_actions = list(self.env.info['valid_words'].keys())
             action = np.random.choice(valid_actions)
 
         return action
 
 
-    def select_action(self, model, input, exploit=False):
+    def select_action(self, model, input, invalid_actions, debug=False):
         if type(input) is np.ndarray:
             input = torch.tensor(input.astype(np.float32)).to(self.device)
 
         out = model(self.input_scaling(input))
-        valid_actions = self.env.info['valid_words'].keys()
-        if exploit:
-            invalid_actions = [
-                w for w in self.env.action_words.keys()
-                if (w not in valid_actions) or (w in self.guessed)
+
+        if debug:
+            top_words = [
+                self.env.words[torch.argmin(torch.abs(out - x)).item()]
+                for x in out[out > 0.42].cpu().detach().numpy()
             ]
+            print(top_words)
+            top_valid_words = [
+                w for w in top_words
+                if self.env.words.index(w) in self.env.valid_words
+            ]
+            print(top_valid_words)
+
+        if input.dim() > 1:
+            for j,ia in enumerate(invalid_actions):
+                out[j,list(ia)] = float("-inf")
+            action = torch.argmax(out, keepdims=True, dim=1)
+            best_action_value = torch.gather(out, 1, action)
         else:
-            invalid_actions = [
-                w for w in self.env.action_words.keys()
-                if (w not in valid_actions)
-            ]
-        out[invalid_actions] = float("-inf")
-        action = torch.argmax(out).item()
-        best_action_value = out[action]
+            out[list(invalid_actions)] = float("-inf")
+            action = torch.argmax(out).item()
+            best_action_value = out[action]
 
         return action, best_action_value
 
@@ -307,12 +339,11 @@ class Wordler(object):
 class Model(nn.Module):
     def __init__(
         self, n_inputs=183,
-        hidden_layer_1=128,
-        hidden_layer_2=64,
-        hidden_layer_3=32,
-        hidden_layer_4=32,
+        hidden_layer_1=256,
+        hidden_layer_2=192,
+        hidden_layer_3=128,
+        hidden_layer_4=96,
         hidden_layer_5=64,
-        hidden_layer_6=128,
         n_outputs=12947,
     ):
         super(Model, self).__init__()
@@ -327,9 +358,7 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_layer_4, hidden_layer_5),
             nn.ReLU(),
-            nn.Linear(hidden_layer_5, hidden_layer_6),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_6, n_outputs),
+            nn.Linear(hidden_layer_5, n_outputs),
         )
 
 
@@ -346,14 +375,18 @@ def test_model(model_dir, episodes=100, verbose=True):
 
     def run_episode(env, agent, model, secret_word=None):
         state = env.reset(secret_word)
-        agent.guessed = set()
+        invalid_actions = set()
         reward = 0
         done = False
         while not done:
-            action, a_val = agent.select_action(model, state, exploit=True)
-            agent.guessed.add(action)
+            action, a_val = agent.select_action(model, state, invalid_actions)
             print("guess: ", env.action_words[action], round(a_val.item(), 3))
             state, R, done, info = env.step(action)
+            invalid_actions = {
+                w for w in env.action_words.keys()
+                if w not in env.info["valid_words"].keys()
+            }
+            invalid_actions.add(action)
             reward += R
 
         print("secret word: ", env.secret_word, f"reward: {round(reward, 2)}")
@@ -377,6 +410,7 @@ def test_model(model_dir, episodes=100, verbose=True):
 def main(
     device,
     model_dir=None,
+    teacher_model_dir=None,
     max_episodes=100,
     C=8,
     batch_size=64,
@@ -385,6 +419,7 @@ def main(
     agent = Wordler(device, verbose)
     model, fsufx = agent.solve(
         model_dir=model_dir,
+        teacher_model_dir=teacher_model_dir,
         max_episodes=max_episodes,
         C=C,
         batch_size=batch_size,
@@ -401,7 +436,8 @@ if __name__ == "__main__":
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
             model_dir=None,
-            max_episodes=75000,
+            teacher_model_dir=None,
+            max_episodes=129304,
             device=device,
             verbose=True,
         )
@@ -411,7 +447,7 @@ if __name__ == "__main__":
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./model_20220322.15.57.44',
+            model_dir='./model_20220323.08.16.00',
             episodes="full",
         )
     else:
