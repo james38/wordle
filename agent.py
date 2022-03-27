@@ -36,7 +36,7 @@ class Wordler(object):
         C=8,
         batch_size=64,
         invalid_batch_size=128,
-        max_experience=1000000,
+        max_experience=100000,
         clip_val=2,
         warmup=2,
         C_factor=4,
@@ -107,7 +107,7 @@ class Wordler(object):
                         if w not in valid_actions
                     }
                     invalid_actions.update(self.guessed)
-                    invalid_action_inds = np.random.choice(
+                    invalid_action_inds = self.np_rng.choice(
                         list(invalid_actions), size=invalid_batch_size
                     )
                 else:
@@ -143,7 +143,7 @@ class Wordler(object):
                         + self.replay_memory[:self.n_t,0]
                     ) / 100
                 )
-                batch_inds = np.random.choice(
+                batch_inds = self.np_rng.choice(
                     self.n_t,
                     size=batch_size,
                     p=(probs / np.sum(probs)),
@@ -164,12 +164,28 @@ class Wordler(object):
                     teacher_influence = max(0, np.exp(
                         -5 * (1 + self.n_episodes) / max_episodes
                     ) - 0.164 * (self.n_episodes / max_episodes))
+                else:
+                    teacher_influence = 0
 
-                Q_prime = self.gamma * self.select_action(
-                    self.target_model,
-                    batch[:,self.n_inputs:-3],
-                    replay_batch_invalid_words,
-                )[1].cpu().detach().numpy().reshape(-1)
+                if teacher_influence > 0:
+                    Q_prime = self.gamma * (
+                        teacher_influence * self.select_action(
+                            self.teacher_model,
+                            batch[:,self.n_inputs:-3],
+                            replay_batch_invalid_words,
+                        )[1].cpu().detach().numpy().reshape(-1)
+                        + (1 - teacher_influence) * self.select_action(
+                            self.target_model,
+                            batch[:,self.n_inputs:-3],
+                            replay_batch_invalid_words,
+                        )[1].cpu().detach().numpy().reshape(-1)
+                    )
+                else:
+                    Q_prime = self.gamma * self.select_action(
+                        self.target_model,
+                        batch[:,self.n_inputs:-3],
+                        replay_batch_invalid_words,
+                    )[1].cpu().detach().numpy().reshape(-1)
 
                 Q_vals = np.where(
                     batch[:,-1] == 1,
@@ -195,10 +211,17 @@ class Wordler(object):
                     state_input = torch.tensor(
                         state_prior,
                         device=self.device
-                    ).float()
+                    ).float().view(1,-1)
+                    self.model.eval()
                     state_logits = self.model(self.input_scaling(state_input))
-                    y_preds_invalid = state_logits[invalid_action_inds]
-
+                    self.model.train()
+                    y_preds_invalid = torch.gather(
+                        state_logits,
+                        1,
+                        torch.tensor(
+                            invalid_action_inds.astype(int)
+                        ).view(1,-1).to(device)
+                    ).view(-1,1)
                     y_preds = torch.cat((y_preds, y_preds_invalid.view(-1,1)))
                 else:
                     y_targets = y_targets[:batch_size,:]
@@ -220,7 +243,7 @@ class Wordler(object):
 
             overall_rewards.append(episode_R)
             if self.verbose and (self.n_episodes % 10 == 0):
-                print("total guesses: ", self.n_t)
+                print("replay memory: ", self.n_t)
                 print(
                     f"episode {self.n_episodes}, last 100 episode mean reward",
                     np.mean(overall_rewards[-100:]).round(3)
@@ -228,6 +251,8 @@ class Wordler(object):
 
             if (self.n_episodes % C) == 0:
                 self.target_model = deepcopy(self.model)
+            if (self.n_episodes % (2 * n_sols)) == 0:
+                self.initialize_replay_memory(n=max_experience, continued=True)
             if self.n_episodes == int(max_episodes / 2):
                 fsufx = dt.datetime.now().strftime("%Y%m%d.%H.%M.%S")
                 torch.save(self.model, f'./model_halftrain_{fsufx}')
@@ -246,7 +271,11 @@ class Wordler(object):
         return self.model, fsufx
 
 
-    def initialize_replay_memory(self, n):
+    def initialize_replay_memory(self, n, continued=False):
+        if continued:
+            inds = self.np_rng.choice(self.n_t, size=int(np.sqrt(self.n_t)))
+            memory_continued = self.replay_memory[inds].copy()
+
         # create as array of maximum experience rows
         self.replay_memory = np.zeros(
             (
@@ -254,17 +283,27 @@ class Wordler(object):
                 2 * self.n_inputs + 3 # two states, one action, reward, done
             )
         )
-        self.n_t = 0
-        self.replay_invalid_words = list()
+
+        if continued:
+            new_n_t = inds.shape[0]
+            self.replay_memory[:new_n_t,:] = memory_continued
+            self.n_t = new_n_t
+            self.replay_invalid_words = [
+                self.replay_invalid_words[i] for i in inds
+            ]
+        else:
+            self.n_t = 0
+            self.replay_invalid_words = list()
+
         return None
 
 
     def epsilon_greedy_action_selection(self, model, input, invalid_actions):
-        if np.random.random() > self.epsilon:
+        if self.np_rng.random() > self.epsilon:
             action, _ = self.select_action(model, input, invalid_actions)
         else:
             valid_actions = list(self.env.info['valid_words'].keys())
-            action = np.random.choice(valid_actions)
+            action = self.np_rng.choice(valid_actions)
 
         return action
 
@@ -272,8 +311,13 @@ class Wordler(object):
     def select_action(self, model, input, invalid_actions, debug=False):
         if type(input) is np.ndarray:
             input = torch.tensor(input.astype(np.float32)).to(self.device)
+            if input.dim() == 1:
+                input = input.view(1,-1)
 
-        out = model(self.input_scaling(input))
+        model.eval()
+        with torch.no_grad():
+            out = model(self.input_scaling(input))
+        model.train()
 
         if debug:
             top_words = [
@@ -287,15 +331,15 @@ class Wordler(object):
             ]
             print(top_valid_words)
 
-        if input.dim() > 1:
+        if input.size(0) > 1:
             for j,ia in enumerate(invalid_actions):
                 out[j,list(ia)] = float("-inf")
             action = torch.argmax(out, keepdims=True, dim=1)
             best_action_value = torch.gather(out, 1, action)
         else:
-            out[list(invalid_actions)] = float("-inf")
+            out[0,list(invalid_actions)] = float("-inf")
             action = torch.argmax(out).item()
-            best_action_value = out[action]
+            best_action_value = out[0,action]
 
         return action, best_action_value
 
@@ -332,6 +376,10 @@ class Wordler(object):
                 window, n_episodes, max(1, int(round(n_episodes / 10)))
             )
         )
+        split_out_path = out_path.split('.')
+        out_path = (
+            '.' + split_out_path[1] + title_suffix + '.' + split_out_path[-1]
+        )
         plt.savefig(out_path)
         return None
 
@@ -339,26 +387,39 @@ class Wordler(object):
 class Model(nn.Module):
     def __init__(
         self, n_inputs=183,
-        hidden_layer_1=256,
-        hidden_layer_2=192,
-        hidden_layer_3=128,
-        hidden_layer_4=96,
-        hidden_layer_5=64,
+        hidden_layer_1=32,
+        hidden_layer_2=32,
+        hidden_layer_3=24,
+        hidden_layer_4=24,
+        hidden_layer_5=16,
+        hidden_layer_6=16,
+        hidden_layer_7=8,
+        hidden_layer_8=8,
         n_outputs=12947,
     ):
         super(Model, self).__init__()
         self.net = nn.Sequential(
             nn.Linear(n_inputs, hidden_layer_1),
+            nn.BatchNorm1d(hidden_layer_1),
             nn.ReLU(),
             nn.Linear(hidden_layer_1, hidden_layer_2),
             nn.ReLU(),
             nn.Linear(hidden_layer_2, hidden_layer_3),
+            nn.BatchNorm1d(hidden_layer_3),
             nn.ReLU(),
             nn.Linear(hidden_layer_3, hidden_layer_4),
             nn.ReLU(),
             nn.Linear(hidden_layer_4, hidden_layer_5),
+            nn.BatchNorm1d(hidden_layer_5),
             nn.ReLU(),
-            nn.Linear(hidden_layer_5, n_outputs),
+            nn.Linear(hidden_layer_5, hidden_layer_6),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_6, hidden_layer_7),
+            nn.BatchNorm1d(hidden_layer_7),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_7, hidden_layer_8),
+            nn.ReLU(),
+            nn.Linear(hidden_layer_8, n_outputs),
         )
 
 
@@ -402,6 +463,9 @@ def test_model(model_dir, episodes=100, verbose=True):
             for secret_word in agent.env.poss_solutions
         ]
 
+    print(
+        f"Fail rate: {round(history.count(0) / len(agent.env.poss_solutions), 3)}"
+    )
     print(f"Average reward: {round(sum(history) / len(history), 3)}")
 
     return history
@@ -436,7 +500,7 @@ if __name__ == "__main__":
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
             model_dir=None,
-            teacher_model_dir=None,
+            teacher_model_dir='./model_20220327.06.57.33',
             max_episodes=129304,
             device=device,
             verbose=True,
@@ -447,7 +511,7 @@ if __name__ == "__main__":
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./model_20220323.08.16.00',
+            model_dir='./model_20220327.06.57.33',
             episodes="full",
         )
     else:
