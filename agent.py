@@ -35,7 +35,7 @@ class Wordler(object):
         max_episodes=1,
         C=8,
         batch_size=64,
-        invalid_batch_size=128,
+        invalid_batch_size=64,
         max_experience=100000,
         clip_val=2,
         warmup=2,
@@ -136,27 +136,20 @@ class Wordler(object):
                 self.replay_memory[self.n_t,-1] = 1 if is_terminal else 0
                 self.n_t += 1
 
-                probs = (
-                    np.minimum(0.8, self.replay_memory[:self.n_t,-2])
-                    + (
-                        np.log(2 + self.n_t)
-                        + self.replay_memory[:self.n_t,0]
-                    ) / 100
-                )
+                if state_prior[0] > 0:
+                    n_batch_inds = batch_size
+                else:
+                    n_batch_inds = batch_size + invalid_batch_size
+
                 batch_inds = self.np_rng.choice(
                     self.n_t,
-                    size=batch_size,
-                    p=(probs / np.sum(probs)),
+                    size=n_batch_inds,
+                    p=self.gen_replay_probs(),
                 )
                 batch = self.replay_memory[batch_inds,:]
                 replay_batch_invalid_words = [
                     self.replay_invalid_words[i] for i in batch_inds
                 ]
-
-                y_targets = torch.zeros(
-                    (batch_size + invalid_batch_size, 1),
-                    device=self.device
-                )
 
                 # numbers chosen so that influence will exponentially decay
                 #  plus a bit of linear decay to hit 0 at roughly halfway
@@ -193,9 +186,18 @@ class Wordler(object):
                     batch[:,-2] + Q_prime
                 )
 
-                y_targets[:batch_size, 0] = torch.tensor(
-                    Q_vals, device=self.device
-                ).float()
+                if state_prior[0] > 0:
+                    y_targets = torch.zeros(
+                        (batch_size + invalid_batch_size, 1),
+                        device=self.device
+                    )
+                    y_targets[:batch_size,0] = torch.tensor(
+                        Q_vals, device=self.device
+                    ).float()
+                else:
+                    y_targets = torch.tensor(
+                        Q_vals, device=self.device
+                    ).float().view(-1,1)
 
                 input = torch.tensor(
                     batch[:,:self.n_inputs], device=self.device
@@ -224,7 +226,7 @@ class Wordler(object):
                     ).view(-1,1)
                     y_preds = torch.cat((y_preds, y_preds_invalid.view(-1,1)))
                 else:
-                    y_targets = y_targets[:batch_size,:]
+                    pass
 
                 loss = self.loss_fx(y_preds, y_targets)
 
@@ -348,6 +350,17 @@ class Wordler(object):
         return (x - 1) / 5
 
 
+    def gen_replay_probs(self):
+        probs = (
+            np.minimum(0.8, self.replay_memory[:self.n_t,-2])
+            + (
+                np.log(2 + self.n_t)
+                + self.replay_memory[:self.n_t,0]
+            ) / 100
+        )
+        return probs / np.sum(probs)
+
+
     def create_r_per_ep_fig(
         self,
         out_path='./training_reward_per_episode.png',
@@ -387,14 +400,14 @@ class Wordler(object):
 class Model(nn.Module):
     def __init__(
         self, n_inputs=183,
-        hidden_layer_1=32,
-        hidden_layer_2=32,
-        hidden_layer_3=24,
-        hidden_layer_4=24,
-        hidden_layer_5=16,
-        hidden_layer_6=16,
-        hidden_layer_7=8,
-        hidden_layer_8=8,
+        hidden_layer_1=1024,
+        hidden_layer_2=512,
+        hidden_layer_3=384,
+        hidden_layer_4=256,
+        hidden_layer_5=192,
+        hidden_layer_6=128,
+        hidden_layer_7=96,
+        hidden_layer_8=64,
         n_outputs=12947,
     ):
         super(Model, self).__init__()
@@ -403,21 +416,25 @@ class Model(nn.Module):
             nn.BatchNorm1d(hidden_layer_1),
             nn.ReLU(),
             nn.Linear(hidden_layer_1, hidden_layer_2),
+            nn.BatchNorm1d(hidden_layer_2),
             nn.ReLU(),
             nn.Linear(hidden_layer_2, hidden_layer_3),
             nn.BatchNorm1d(hidden_layer_3),
             nn.ReLU(),
             nn.Linear(hidden_layer_3, hidden_layer_4),
+            nn.BatchNorm1d(hidden_layer_4),
             nn.ReLU(),
             nn.Linear(hidden_layer_4, hidden_layer_5),
             nn.BatchNorm1d(hidden_layer_5),
             nn.ReLU(),
             nn.Linear(hidden_layer_5, hidden_layer_6),
+            nn.BatchNorm1d(hidden_layer_6),
             nn.ReLU(),
             nn.Linear(hidden_layer_6, hidden_layer_7),
             nn.BatchNorm1d(hidden_layer_7),
             nn.ReLU(),
             nn.Linear(hidden_layer_7, hidden_layer_8),
+            nn.BatchNorm1d(hidden_layer_8),
             nn.ReLU(),
             nn.Linear(hidden_layer_8, n_outputs),
         )
@@ -500,7 +517,7 @@ if __name__ == "__main__":
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
             model_dir=None,
-            teacher_model_dir='./model_20220327.06.57.33',
+            teacher_model_dir=None,
             max_episodes=129304,
             device=device,
             verbose=True,
