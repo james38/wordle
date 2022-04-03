@@ -19,8 +19,8 @@ class Wordler(object):
 
         self.n_inputs = 183
 
-        self.alpha = 0.001
-        self.epsilon = 0.999
+        self.alpha = 0.0001
+        self.epsilon = 0.75
         self.min_epsilon = 0.02
         self.gamma = 0.9999
 
@@ -35,7 +35,7 @@ class Wordler(object):
         max_episodes=1,
         C=8,
         batch_size=64,
-        invalid_batch_size=64,
+        invalid_batch_size=0,
         max_experience=100000,
         clip_val=2,
         warmup=2,
@@ -63,13 +63,7 @@ class Wordler(object):
         )
 
         self.initialize_replay_memory(n=max_experience)
-        # set epsilon decay dynamically based on max episodes
-        #  such that it would reach roughly half of the min by
-        #  the end of the max episodes (with estimate of guess/episode)
-        self.epsilon_decay = np.exp(
-            np.log((self.min_epsilon / 2) / self.epsilon)
-            / (max_episodes * 5)
-        )
+        self.initialize_epsilon_decay(max_episodes)
 
         self.n_episodes = 0
         n_sols = len(self.env.poss_solutions)
@@ -81,7 +75,7 @@ class Wordler(object):
                     param_group['lr'] *= lr_drop_rate
                 self.min_epsilon *= lr_drop_rate
                 C *= C_factor
-            elif self.n_episodes == int(settle_at * max_episodes):
+            elif self.n_episodes == len(self.env.poss_solutions):
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] *= settle_rate
                 C *= C_factor
@@ -107,9 +101,10 @@ class Wordler(object):
                         if w not in valid_actions
                     }
                     invalid_actions.update(self.guessed)
-                    invalid_action_inds = self.np_rng.choice(
-                        list(invalid_actions), size=invalid_batch_size
-                    )
+                    if invalid_batch_size > 0:
+                        invalid_action_inds = self.np_rng.choice(
+                            list(invalid_actions), size=invalid_batch_size
+                        )
                 else:
                     invalid_actions = list()
                 self.replay_invalid_words.append(invalid_actions)
@@ -204,18 +199,18 @@ class Wordler(object):
                 ).float()
 
                 y_preds = torch.gather(
-                    self.model(self.input_scaling(input)),
+                    self.model(input),
                     1,
                     torch.tensor(batch[:,-3].astype(int)).view(-1,1).to(device)
                 )
 
-                if state_prior[0] > 0:
+                if (invalid_batch_size > 0) and (state_prior[0] > 0):
                     state_input = torch.tensor(
                         state_prior,
                         device=self.device
                     ).float().view(1,-1)
                     self.model.eval()
-                    state_logits = self.model(self.input_scaling(state_input))
+                    state_logits = self.model(state_input)
                     self.model.train()
                     y_preds_invalid = torch.gather(
                         state_logits,
@@ -318,7 +313,7 @@ class Wordler(object):
 
         model.eval()
         with torch.no_grad():
-            out = model(self.input_scaling(input))
+            out = model(input)
         model.train()
 
         if debug:
@@ -348,6 +343,19 @@ class Wordler(object):
 
     def input_scaling(self, x):
         return (x - 1) / 5
+
+
+    def initialize_epsilon_decay(self, max_episodes):
+        """
+        set epsilon decay dynamically based on max episodes
+         such that it would reach roughly half of the min by
+         the end of the max episodes (with estimate of guess/episode)
+        """
+        self.epsilon_decay = np.exp(
+            np.log((self.min_epsilon / 2) / self.epsilon)
+            / (max_episodes * 5)
+        )
+        return None
 
 
     def gen_replay_probs(self):
@@ -480,9 +488,7 @@ def test_model(model_dir, episodes=100, verbose=True):
             for secret_word in agent.env.poss_solutions
         ]
 
-    print(
-        f"Fail rate: {round(history.count(0) / len(agent.env.poss_solutions), 3)}"
-    )
+    print(f"Fail rate: {round(history.count(0) / len(history), 3)}")
     print(f"Average reward: {round(sum(history) / len(history), 3)}")
 
     return history
@@ -516,7 +522,7 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir=None,
+            model_dir='./model_20220403.07.13.49',
             teacher_model_dir=None,
             max_episodes=129304,
             device=device,
@@ -528,7 +534,7 @@ if __name__ == "__main__":
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./model_20220327.06.57.33',
+            model_dir='./model_20220403.07.13.49',
             episodes="full",
         )
     else:
