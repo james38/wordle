@@ -7,6 +7,8 @@ import gym
 
 import torch
 import torch.nn as nn
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import einops
 
 from wordle_rl import WordleEnv
 
@@ -20,7 +22,7 @@ class Wordler(object):
         self.n_inputs = 183
 
         self.alpha = 0.0001
-        self.epsilon = 0.75
+        self.epsilon = 0.9
         self.min_epsilon = 0.02
         self.gamma = 0.9999
 
@@ -199,7 +201,7 @@ class Wordler(object):
                 ).float()
 
                 y_preds = torch.gather(
-                    self.model(input),
+                    self.model(input)[:,-1,:],
                     1,
                     torch.tensor(batch[:,-3].astype(int)).view(-1,1).to(device)
                 )
@@ -210,7 +212,7 @@ class Wordler(object):
                         device=self.device
                     ).float().view(1,-1)
                     self.model.eval()
-                    state_logits = self.model(state_input)
+                    state_logits = self.model(state_input)[:,-1,:]
                     self.model.train()
                     y_preds_invalid = torch.gather(
                         state_logits,
@@ -315,6 +317,7 @@ class Wordler(object):
         with torch.no_grad():
             out = model(input)
         model.train()
+        out = out[:,-1,:]
 
         if debug:
             top_words = [
@@ -360,7 +363,7 @@ class Wordler(object):
 
     def gen_replay_probs(self):
         probs = (
-            np.minimum(0.8, self.replay_memory[:self.n_t,-2])
+            np.minimum(0.9, self.replay_memory[:self.n_t,-2])
             + (
                 np.log(2 + self.n_t)
                 + self.replay_memory[:self.n_t,0]
@@ -406,50 +409,107 @@ class Wordler(object):
 
 
 class Model(nn.Module):
+    """
+    https://pytorch.org/tutorials/beginner/transformer_tutorial.html
+    """
+    # def __init__(
+    #     self, n_inputs=183,
+    #     hidden_layer_1=1024,
+    #     hidden_layer_2=512,
+    #     hidden_layer_3=384,
+    #     hidden_layer_4=256,
+    #     hidden_layer_5=192,
+    #     hidden_layer_6=128,
+    #     hidden_layer_7=96,
+    #     hidden_layer_8=64,
+    #     n_outputs=12947,
+    # ):
     def __init__(
-        self, n_inputs=183,
-        hidden_layer_1=1024,
-        hidden_layer_2=512,
-        hidden_layer_3=384,
-        hidden_layer_4=256,
-        hidden_layer_5=192,
-        hidden_layer_6=128,
-        hidden_layer_7=96,
-        hidden_layer_8=64,
+        self,
+        ntokens=14, # size of vocabulary
         n_outputs=12947,
+        d_model=128, # embedding dimension
+        nhead=8, # number of heads in nn.MultiheadAttention
+        d_hid=512, # feedforward dimension in nn.TransformerEncoder
+        nlayers=2, # nn.TransformerEncoderLayer in nn.TransformerEncoder
+        dropout=0.1, # dropout probability
     ):
         super(Model, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_inputs, hidden_layer_1),
-            nn.BatchNorm1d(hidden_layer_1),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_1, hidden_layer_2),
-            nn.BatchNorm1d(hidden_layer_2),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_2, hidden_layer_3),
-            nn.BatchNorm1d(hidden_layer_3),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_3, hidden_layer_4),
-            nn.BatchNorm1d(hidden_layer_4),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_4, hidden_layer_5),
-            nn.BatchNorm1d(hidden_layer_5),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_5, hidden_layer_6),
-            nn.BatchNorm1d(hidden_layer_6),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_6, hidden_layer_7),
-            nn.BatchNorm1d(hidden_layer_7),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_7, hidden_layer_8),
-            nn.BatchNorm1d(hidden_layer_8),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_8, n_outputs),
+
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        encoder_layers = TransformerEncoderLayer(
+            d_model, nhead, d_hid, dropout, batch_first=True
         )
+        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+        self.encoder = nn.Embedding(ntokens, d_model)
+        self.d_model = d_model
+        self.decoder = nn.Linear(d_model, n_outputs)
+
+        self.init_weights()
+
+        # self.net = nn.Sequential(
+        #     nn.Linear(n_inputs, hidden_layer_1),
+        #     nn.BatchNorm1d(hidden_layer_1),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_1, hidden_layer_2),
+        #     nn.BatchNorm1d(hidden_layer_2),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_2, hidden_layer_3),
+        #     nn.BatchNorm1d(hidden_layer_3),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_3, hidden_layer_4),
+        #     nn.BatchNorm1d(hidden_layer_4),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_4, hidden_layer_5),
+        #     nn.BatchNorm1d(hidden_layer_5),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_5, hidden_layer_6),
+        #     nn.BatchNorm1d(hidden_layer_6),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_6, hidden_layer_7),
+        #     nn.BatchNorm1d(hidden_layer_7),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_7, hidden_layer_8),
+        #     nn.BatchNorm1d(hidden_layer_8),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_layer_8, n_outputs),
+        # )
+
+
+    def init_weights(self):
+        init_range = 0.1
+        self.encoder.weight.data.uniform_(-init_range, init_range)
+        self.decoder.bias.data.zero_()
+        self.decoder.weight.data.uniform_(-init_range, init_range)
+        return None
 
 
     def forward(self, x):
-        return self.net(x)
+        # return self.net(x)
+        x = x.long()
+        x = self.encoder(x) * np.sqrt(self.d_model)
+        x = self.pos_encoder(x)
+        output = self.transformer_encoder(x)
+        return self.decoder(output)
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout, max_seq_len=183):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position = torch.arange(max_seq_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(max_seq_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+
+    def forward(self, x):
+        x = torch.add(x, self.pe[:x.size(0)])
+        return self.dropout(x)
 
 
 def test_model(model_dir, episodes=100, verbose=True):
@@ -522,9 +582,9 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir='./model_20220403.07.13.49',
+            model_dir='./model_20220408.16.21.45',
             teacher_model_dir=None,
-            max_episodes=129304,
+            max_episodes=69270,
             device=device,
             verbose=True,
         )
@@ -534,7 +594,7 @@ if __name__ == "__main__":
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./model_20220403.07.13.49',
+            model_dir='./model_20220408.16.21.45',
             episodes="full",
         )
     else:
