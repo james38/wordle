@@ -18,7 +18,7 @@ class WordleEnv(gym.Env):
         solution_words_loc='./words.json',
         n_letters=5,
         max_attempts=6,
-        L=3.4,
+        L=4,
         min_guesses=True,
     ):
         self.seed()
@@ -31,6 +31,8 @@ class WordleEnv(gym.Env):
         assert type(max_attempts) is int, "number of max attempts must be int"
         self.n_letters = n_letters
         self.max_attempts = max_attempts
+
+        self.load_solutions(solution_words_loc)
         self.L = L
         self.gen_reward(min_guesses)
         self.reward_range = (0,1) # optional to specify
@@ -72,7 +74,6 @@ class WordleEnv(gym.Env):
         # required variable for environment
         self.action_space = spaces.Discrete(len(self.words))
 
-        self.load_solutions(solution_words_loc)
         if secret_word is None:
             self.reset()
         else:
@@ -368,8 +369,13 @@ class WordleEnv(gym.Env):
         """
         if min_guesses:
             self.rewards = [
-                self.gt_n_poisson(self.L, i)
-                for i in range(1, 1 + self.max_attempts)
+                (
+                    self.gt_n_poisson(self.L, i)
+                    * (
+                        (1 / self.gt_n_poisson(self.L, 1))
+                        * (1 - (1 / len(self.poss_solutions)))
+                    )
+                ) for i in range(1, 1 + self.max_attempts)
             ]
         else:
             self.rewards = [1 for i in range(1, 1 + self.max_attempts)]
