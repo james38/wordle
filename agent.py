@@ -17,10 +17,11 @@ class Wordler(object):
         self.env.seed(19)
         self.np_rng = np.random.default_rng(19)
 
+        self.DEALT = 2709
         self.n_inputs = 183
 
         self.alpha = 0.0001
-        self.epsilon = 0.75
+        self.epsilon = 0.4
         self.min_epsilon = 0.02
         self.gamma = 0.9999
 
@@ -67,6 +68,7 @@ class Wordler(object):
 
         self.n_episodes = 0
         n_sols = len(self.env.poss_solutions)
+        sol_inds = self.shuffle_solutions(n_sols, max_episodes)
         overall_rewards = list()
         is_solved = False
         while not is_solved:
@@ -87,7 +89,9 @@ class Wordler(object):
                 C = max(2, int((1 + self.n_episodes) / warmup))
 
             self.state = self.env.reset(
-                self.env.poss_solutions[self.n_episodes % n_sols]
+                # self.env.poss_solutions[self.n_episodes % n_sols]
+                # self.env.poss_solutions[self.np_rng.integers(n_sols)]
+                self.env.poss_solutions[sol_inds[self.n_episodes]]
             )
             self.guessed = set()
             episode_R = 0
@@ -111,11 +115,15 @@ class Wordler(object):
 
                 info = {'valid': False}
                 while not info['valid']:
-                    action = self.epsilon_greedy_action_selection(
-                        self.model,
-                        self.state,
-                        invalid_actions,
-                    )
+
+                    if self.DEALT in self.env.info["valid_words"].keys():
+                        action = self.DEALT
+                    else:
+                        action = self.epsilon_greedy_action_selection(
+                            self.model,
+                            self.state,
+                            invalid_actions,
+                        )
                     s_prime, R, is_terminal, info = self.env.step(action)
 
                 self.guessed.add(action)
@@ -266,6 +274,16 @@ class Wordler(object):
         self.rewards = overall_rewards
 
         return self.model, fsufx
+
+
+    def shuffle_solutions(self, n_sols, max_episodes):
+        times_thru = int(max_episodes / n_sols)
+        all_sol_inds = list()
+        for _ in range(times_thru):
+            sol_inds = list(range(n_sols))
+            self.np_rng.shuffle(sol_inds)
+            all_sol_inds.extend(sol_inds)
+        return all_sol_inds
 
 
     def initialize_replay_memory(self, n, continued=False):
@@ -466,6 +484,8 @@ def test_model(model_dir, episodes=100, verbose=True):
         done = False
         while not done:
             action, a_val = agent.select_action(model, state, invalid_actions)
+            if 2709 in env.info["valid_words"].keys():
+                action = 2709
             print("guess: ", env.action_words[action], round(a_val.item(), 3))
             state, R, done, info = env.step(action)
             invalid_actions = {
@@ -522,9 +542,9 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir='./model_20220403.07.13.49',
+            model_dir='./model_20221118.08.02.40',
             teacher_model_dir=None,
-            max_episodes=129304,
+            max_episodes=115450,
             device=device,
             verbose=True,
         )
