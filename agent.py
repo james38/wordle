@@ -12,12 +12,12 @@ from wordle_rl import WordleEnv
 
 
 class Wordler(object):
-    def __init__(self, device, verbose=False):
+    def __init__(self, device, fixed_start=None, verbose=False):
         self.env = WordleEnv()
         self.env.seed(19)
         self.np_rng = np.random.default_rng(19)
 
-        self.DEALT = 2709
+        self.fixed_start = fixed_start
         self.n_inputs = 183
 
         self.alpha = 0.0001
@@ -40,11 +40,8 @@ class Wordler(object):
         max_experience=100000,
         clip_val=2,
         warmup=2,
-        C_factor=4,
-        settle_at=0.01,
-        settle_rate=0.3,
-        lr_drop_at=0.9,
-        lr_drop_rate=0.1,
+        C_factor=2,
+        T_max=23090,
     ):
 
         if model_dir is not None:
@@ -58,9 +55,13 @@ class Wordler(object):
         self.target_model = deepcopy(self.model)
         self.C = C
         self.loss_fx = nn.MSELoss()
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.alpha,
+        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=T_max,
         )
 
         self.initialize_replay_memory(n=max_experience)
@@ -72,25 +73,10 @@ class Wordler(object):
         overall_rewards = list()
         is_solved = False
         while not is_solved:
-            if self.n_episodes == int(lr_drop_at * max_episodes):
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] *= lr_drop_rate
-                self.min_epsilon *= lr_drop_rate
-                C *= C_factor
-            elif self.n_episodes == len(self.env.poss_solutions):
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] *= settle_rate
-                C *= C_factor
-            if self.n_episodes < (warmup * self.C):
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = (
-                        self.alpha * (1 + self.n_episodes) / (warmup * self.C)
-                    )
-                C = max(2, int((1 + self.n_episodes) / warmup))
+            if self.n_episodes <= n_sols:
+                C = self.modulate_C(C, warmup, C_factor, n_sols)
 
             self.state = self.env.reset(
-                # self.env.poss_solutions[self.n_episodes % n_sols]
-                # self.env.poss_solutions[self.np_rng.integers(n_sols)]
                 self.env.poss_solutions[sol_inds[self.n_episodes]]
             )
             self.guessed = set()
@@ -111,13 +97,13 @@ class Wordler(object):
                         )
                 else:
                     invalid_actions = list()
+
                 self.replay_invalid_words.append(invalid_actions)
 
                 info = {'valid': False}
                 while not info['valid']:
-
-                    if self.DEALT in self.env.info["valid_words"].keys():
-                        action = self.DEALT
+                    if self.fixed_start in self.env.info["valid_words"].keys():
+                        action = self.fixed_start
                     else:
                         action = self.epsilon_greedy_action_selection(
                             self.model,
@@ -154,34 +140,29 @@ class Wordler(object):
                     self.replay_invalid_words[i] for i in batch_inds
                 ]
 
-                # numbers chosen so that influence will exponentially decay
-                #  plus a bit of linear decay to hit 0 at roughly halfway
-                if teacher_model_dir is not None:
-                    teacher_influence = max(0, np.exp(
-                        -5 * (1 + self.n_episodes) / max_episodes
-                    ) - 0.164 * (self.n_episodes / max_episodes))
-                else:
-                    teacher_influence = 0
+                Q_prime = self.gamma * self.select_action(
+                    self.target_model,
+                    batch[:,self.n_inputs:-3],
+                    replay_batch_invalid_words,
+                )[1].cpu().detach().numpy().reshape(-1)
 
-                if teacher_influence > 0:
-                    Q_prime = self.gamma * (
-                        teacher_influence * self.select_action(
-                            self.teacher_model,
-                            batch[:,self.n_inputs:-3],
-                            replay_batch_invalid_words,
-                        )[1].cpu().detach().numpy().reshape(-1)
-                        + (1 - teacher_influence) * self.select_action(
-                            self.target_model,
-                            batch[:,self.n_inputs:-3],
-                            replay_batch_invalid_words,
-                        )[1].cpu().detach().numpy().reshape(-1)
-                    )
-                else:
-                    Q_prime = self.gamma * self.select_action(
-                        self.target_model,
-                        batch[:,self.n_inputs:-3],
-                        replay_batch_invalid_words,
-                    )[1].cpu().detach().numpy().reshape(-1)
+                if teacher_model_dir is not None:
+                    # numbers chosen so that influence will exponentially decay
+                    #  plus a bit of linear decay to hit 0 at roughly halfway
+                    teacher_influence = np.exp(
+                        -5 * (1 + self.n_episodes) / max_episodes
+                    ) - 0.164 * (self.n_episodes / max_episodes)
+                    if teacher_influence > 0:
+                        Q_prime = (
+                            (1 - teacher_influence) * Q_prime
+                            + teacher_influence * self.gamma * (
+                                self.select_action(
+                                    self.teacher_model,
+                                    batch[:,self.n_inputs:-3],
+                                    replay_batch_invalid_words,
+                                )[1].cpu().detach().numpy().reshape(-1)
+                            )
+                        )
 
                 Q_vals = np.where(
                     batch[:,-1] == 1,
@@ -241,6 +222,7 @@ class Wordler(object):
                 # self.state = s_prime
 
             self.n_episodes += 1
+            scheduler.step()
 
             if self.verbose:
                 print("guesses", self.env.n_guesses)
@@ -260,20 +242,25 @@ class Wordler(object):
                 self.initialize_replay_memory(n=max_experience, continued=True)
             if self.n_episodes == int(max_episodes / 2):
                 fsufx = dt.datetime.now().strftime("%Y%m%d.%H.%M.%S")
-                torch.save(self.model, f'./model_halftrain_{fsufx}')
+                torch.save(self.model, f'./models/model_halftrain_{fsufx}')
 
-            # q_val_converged = False
-            # if (q_val_converged):
-            #     is_solved = True
+
+            if self.q_val_converged():
+                is_solved = True
             if self.n_episodes == max_episodes:
                 break
 
         fsufx = dt.datetime.now().strftime("%Y%m%d.%H.%M.%S")
-        torch.save(self.model, f'./model_{fsufx}')
+        torch.save(self.model, f'./models/model_{fsufx}')
 
         self.rewards = overall_rewards
 
         return self.model, fsufx
+
+
+    def q_val_converged(self):
+        """Not implemented"""
+        return False
 
 
     def shuffle_solutions(self, n_sols, max_episodes):
@@ -357,6 +344,14 @@ class Wordler(object):
             best_action_value = out[0,action]
 
         return action, best_action_value
+
+
+    def modulate_C(self, C, warmup, C_factor, n_sols):
+        if self.n_episodes < (warmup * self.C):
+            C = max(2, int((1 + self.n_episodes) / warmup))
+        elif self.n_episodes == n_sols:
+            C *= C_factor
+        return C
 
 
     def input_scaling(self, x):
@@ -470,10 +465,10 @@ class Model(nn.Module):
         return self.net(x)
 
 
-def test_model(model_dir, episodes=100, verbose=True):
+def test_model(model_dir, episodes=100, fixed_start=None, verbose=True):
     model = torch.load(model_dir)
 
-    agent = Wordler(device, verbose)
+    agent = Wordler(device, fixed_start, verbose)
 
     agent.env = WordleEnv()
 
@@ -484,8 +479,8 @@ def test_model(model_dir, episodes=100, verbose=True):
         done = False
         while not done:
             action, a_val = agent.select_action(model, state, invalid_actions)
-            if 2709 in env.info["valid_words"].keys():
-                action = 2709
+            if fixed_start in env.info["valid_words"].keys():
+                action = fixed_start
             print("guess: ", env.action_words[action], round(a_val.item(), 3))
             state, R, done, info = env.step(action)
             invalid_actions = {
@@ -498,7 +493,7 @@ def test_model(model_dir, episodes=100, verbose=True):
         print("secret word: ", env.secret_word, f"reward: {round(reward, 2)}")
         return reward
 
-    if type(episodes) is int:
+    if isinstance(episodes, int):
         history = [
             run_episode(agent.env, agent, model) for _ in range(episodes)
         ]
@@ -516,6 +511,7 @@ def test_model(model_dir, episodes=100, verbose=True):
 
 def main(
     device,
+    fixed_start=None,
     model_dir=None,
     teacher_model_dir=None,
     max_episodes=100,
@@ -523,7 +519,7 @@ def main(
     batch_size=64,
     verbose=False,
 ):
-    agent = Wordler(device, verbose)
+    agent = Wordler(device, fixed_start, verbose)
     model, fsufx = agent.solve(
         model_dir=model_dir,
         teacher_model_dir=teacher_model_dir,
@@ -542,19 +538,20 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir='./model_20221118.08.02.40',
+            model_dir='./models/model_20221118.08.02.40',
             teacher_model_dir=None,
             max_episodes=115450,
             device=device,
             verbose=True,
         )
         history = test_model(
-            model_dir=f"./model_{fsufx}",
+            model_dir=f"./models/model_{fsufx}",
             episodes="full",
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./model_20220403.07.13.49',
+            model_dir='./models/model_20220403.07.13.49',
+            # fixed_start=2709, # DEALT
             episodes="full",
         )
     else:
