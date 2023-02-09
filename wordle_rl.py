@@ -27,14 +27,17 @@ class WordleEnv(gym.Env):
         # construct the possible actions as integer-indexed valid words
         self.action_words = {i: w for i, w in enumerate(self.words)}
 
-        assert type(n_letters) is int, "number of letters must be int"
-        assert type(max_attempts) is int, "number of max attempts must be int"
+        assert isinstance(n_letters, int), "number of letters must be int"
+        assert isinstance(max_attempts, int), "max attempts must be int"
         self.n_letters = n_letters
         self.max_attempts = max_attempts
 
         self.load_solutions(solution_words_loc)
         self.L = L
-        self.gen_reward(min_guesses)
+        if min_guesses:
+            self.gen_reward()
+        else:
+            self.gen_binary_reward()
         self.reward_range = (0,1) # optional to specify
 
         alphabet = list(string.ascii_lowercase)
@@ -77,7 +80,7 @@ class WordleEnv(gym.Env):
         if secret_word is None:
             self.reset()
         else:
-            assert type(secret_word) is str, "secret word must be str"
+            assert isinstance(secret_word, str), "secret word must be str"
             assert len(secret_word) == n_letters, "secret word wrong length"
             self.reset(secret_word)
 
@@ -354,7 +357,7 @@ class WordleEnv(gym.Env):
         """
         returns the inverse of the Poisson CDF with mean, L, at x=n integer
         """
-        assert type(n) is int, "sample value must be integer"
+        assert isinstance(n, int), "sample value must be integer"
         sum_prob = 0
         for i in range(n):
             sum_prob += (L**i) / math.factorial(i)
@@ -362,23 +365,28 @@ class WordleEnv(gym.Env):
         return 1 - sum_prob
 
 
-    def gen_reward(self, min_guesses):
+    def gen_reward(self):
         """
-        returns the reward structure that provides return in proportion to
-        the number of guesses for success
+        this reward structure provides return in proportion to
+          the number of guesses for success
         """
-        if min_guesses:
-            self.rewards = [
-                (
-                    self.gt_n_poisson(self.L, i)
-                    * (
-                        (1 / self.gt_n_poisson(self.L, 1))
-                        * (1 - (1 / len(self.poss_solutions)))
-                    )
-                ) for i in range(1, 1 + self.max_attempts)
-            ]
-        else:
-            self.rewards = [1 for i in range(1, 1 + self.max_attempts)]
+        self.rewards = [
+            (
+                self.gt_n_poisson(self.L, i)
+                * (
+                    (1 / self.gt_n_poisson(self.L, 1))
+                    * (1 - (1 / len(self.poss_solutions)))
+                )
+            ) for i in range(1, 1 + self.max_attempts)
+        ]
+        return None
+
+
+    def gen_binary_reward(self):
+        """
+        1 for the reward if the word is guessed in at most max_attempts
+        """
+        self.rewards = [1 for i in range(1, 1 + self.max_attempts)]
         return None
 
 
