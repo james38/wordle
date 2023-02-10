@@ -12,16 +12,16 @@ from wordle_rl import WordleEnv
 
 
 class Wordler(object):
-    def __init__(self, device, fixed_start=None, verbose=False):
+    def __init__(self, device, fixed_start=None, verbose=False, seed=19):
         self.env = WordleEnv()
-        self.env.seed(19)
-        self.np_rng = np.random.default_rng(19)
+        self.env.seed(seed)
+        self.np_rng = np.random.default_rng(seed)
 
         self.fixed_start = fixed_start
         self.n_inputs = 183
 
         self.alpha = 0.0001
-        self.epsilon = 0.4
+        self.epsilon = 0.99
         self.min_epsilon = 0.02
         self.gamma = 0.9999
 
@@ -47,7 +47,16 @@ class Wordler(object):
         if model_dir is not None:
             self.model = torch.load(model_dir)
         else:
-            self.model = Model().to(self.device).float()
+            self.model = ResNN(
+                in_channels=4,
+                out_channels=8,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False,
+                pool_kernel_size=1,
+                pool_stride=1,
+            ).to(self.device).float()
         if teacher_model_dir is not None:
             self.teacher_model = torch.load(teacher_model_dir)
         for p in self.model.parameters():
@@ -183,9 +192,7 @@ class Wordler(object):
                         Q_vals, device=self.device
                     ).float().view(-1,1)
 
-                input = torch.tensor(
-                    batch[:,:self.n_inputs], device=self.device
-                ).float()
+                input = self.batch_to_input(batch[:,:self.n_inputs])
 
                 y_preds = torch.gather(
                     self.model(input),
@@ -194,10 +201,7 @@ class Wordler(object):
                 )
 
                 if (invalid_batch_size > 0) and (state_prior[0] > 0):
-                    state_input = torch.tensor(
-                        state_prior,
-                        device=self.device
-                    ).float().view(1,-1)
+                    state_input = self.state_to_input(state_prior)
                     self.model.eval()
                     state_logits = self.model(state_input)
                     self.model.train()
@@ -222,7 +226,7 @@ class Wordler(object):
                 # self.state = s_prime
 
             self.n_episodes += 1
-            scheduler.step()
+            self.scheduler.step()
 
             if self.verbose:
                 print("guesses", self.env.n_guesses)
@@ -311,10 +315,11 @@ class Wordler(object):
 
 
     def select_action(self, model, input, invalid_actions, debug=False):
-        if type(input) is np.ndarray:
-            input = torch.tensor(input.astype(np.float32)).to(self.device)
-            if input.dim() == 1:
-                input = input.view(1,-1)
+        if isinstance(input, np.ndarray):
+            if input.ndim > 1:
+                input = self.batch_to_input(input)
+            else:
+                input = self.state_to_input(input)
 
         model.eval()
         with torch.no_grad():
@@ -344,6 +349,49 @@ class Wordler(object):
             best_action_value = out[0,action]
 
         return action, best_action_value
+
+
+    def batch_to_input(self, batch):
+        input = np.zeros(
+            (batch.shape[0],4,self.env.len_alphabet,self.env.n_letters)
+        )
+        input[:,0,:,:] = ((batch[:,0] - 1) / 5).reshape(input.shape[0],1,1)
+        input[:,1,:,:] = batch[
+            :,
+            1:(self.n_inputs - 2 * 26)
+        ].reshape(
+            input.shape[0],input.shape[2],input.shape[3]
+        )
+        input[:,2,:,:] = batch[
+            :,
+            (self.n_inputs - 2 * 26):(self.n_inputs - 26)
+        ].reshape(
+            input.shape[0],input.shape[2],-1
+        )
+        input[:,3,:,:] = batch[
+            :,
+            (self.n_inputs - 26):self.n_inputs
+        ].reshape(
+            input.shape[0],input.shape[2],-1
+        )
+        return torch.tensor(input, device=self.device).float()
+
+
+    def state_to_input(self, state):
+        input = np.zeros((1,4,self.env.len_alphabet,self.env.n_letters))
+        input[0,0,:,:] = self.input_scaling(state[0])
+        input[0,1,:,:] = state[1:(self.n_inputs - 2 * 26)].reshape(
+            input.shape[2],input.shape[3]
+        )
+        input[0,2,:,:] = state[
+            (self.n_inputs - 2 * 26):(self.n_inputs - 26)
+        ].reshape(
+            input.shape[2],-1
+        )
+        input[0,3,:,:] = state[(self.n_inputs - 26):self.n_inputs].reshape(
+            input.shape[2],-1
+        )
+        return torch.tensor(input, device=self.device).float()
 
 
     def modulate_C(self, C, warmup, C_factor, n_sols):
@@ -418,51 +466,151 @@ class Wordler(object):
         return None
 
 
-class Model(nn.Module):
+class ConvBlock(nn.Module):
     def __init__(
-        self, n_inputs=183,
-        hidden_layer_1=1024,
-        hidden_layer_2=512,
-        hidden_layer_3=384,
-        hidden_layer_4=256,
-        hidden_layer_5=192,
-        hidden_layer_6=128,
-        hidden_layer_7=96,
-        hidden_layer_8=64,
-        n_outputs=12947,
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        bias,
     ):
-        super(Model, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_inputs, hidden_layer_1),
-            nn.BatchNorm1d(hidden_layer_1),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_1, hidden_layer_2),
-            nn.BatchNorm1d(hidden_layer_2),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_2, hidden_layer_3),
-            nn.BatchNorm1d(hidden_layer_3),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_3, hidden_layer_4),
-            nn.BatchNorm1d(hidden_layer_4),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_4, hidden_layer_5),
-            nn.BatchNorm1d(hidden_layer_5),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_5, hidden_layer_6),
-            nn.BatchNorm1d(hidden_layer_6),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_6, hidden_layer_7),
-            nn.BatchNorm1d(hidden_layer_7),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_7, hidden_layer_8),
-            nn.BatchNorm1d(hidden_layer_8),
-            nn.ReLU(),
-            nn.Linear(hidden_layer_8, n_outputs),
+        super(ConvBlock, self).__init__()
+
+        self.conv = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+
+
+    def forward(self, x):
+        a = self.bn(self.conv(x))
+        return a
+
+
+class SEBlock(nn.Module):
+    """
+    https://github.com/moskomule/senet.pytorch/blob/master/senet/se_module.py
+    """
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.squeezed = int(channels / reduction)
+
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, self.squeezed, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.squeezed, channels, bias=False),
+            nn.Sigmoid()
         )
 
 
     def forward(self, x):
-        return self.net(x)
+        n, c, _, _ = x.size()
+        y = self.pool(x).view(n, c)
+        y = self.fc(y).view(n, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        bias,
+    ):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = ConvBlock(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            bias,
+        )
+        self.conv2 = ConvBlock(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            bias,
+        )
+        self.se = SEBlock(out_channels, reduction=4)
+
+
+    def forward(self, x):
+        a = torch.relu(self.conv1(x))
+        a = self.conv2(a)
+        a = self.se(a)
+        a += x
+        return torch.relu(a)
+
+
+class ResNN(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        bias,
+        pool_kernel_size,
+        pool_stride
+    ):
+        super(ResNN, self).__init__()
+        self.conv_block = ConvBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
+        self.res_block1 = ResidualBlock(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
+        self.res_block2 = ResidualBlock(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
+        self.pool1 = nn.MaxPool2d(
+            kernel_size=pool_kernel_size,
+            stride=pool_stride,
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.dropout = nn.Dropout2d(1e-1)
+        self.linear1 = nn.Linear(1040, 12947)
+
+
+    def forward(self, x):
+        a = self.dropout(self.pool1(torch.relu(self.conv_block(x))))
+        a = self.res_block1(a)
+        a = self.res_block2(a)
+        a = self.bn(a)
+        z = a.view(a.size(0), -1)
+        y = self.linear1(z)
+        return y
 
 
 def test_model(model_dir, episodes=100, fixed_start=None, verbose=True):
@@ -538,7 +686,8 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir='./models/model_20221118.08.02.40',
+            # model_dir='./models/model_20221118.08.02.40',
+            model_dir=None,
             teacher_model_dir=None,
             max_episodes=115450,
             device=device,
@@ -557,7 +706,7 @@ if __name__ == "__main__":
     else:
         agent, fsufx = main(
             model_dir=None,
-            max_episodes=1000,
+            max_episodes=4618,
             device=device,
             verbose=True,
         )
