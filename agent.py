@@ -20,7 +20,7 @@ class Wordler(object):
         self.fixed_start = fixed_start
         self.n_inputs = 183
 
-        self.alpha = 0.0001
+        self.alpha = 0.0003
         self.epsilon = 0.99
         self.min_epsilon = 0.02
         self.gamma = 0.9999
@@ -49,7 +49,7 @@ class Wordler(object):
         else:
             self.model = ResNN(
                 in_channels=4,
-                out_channels=8,
+                out_channels=12,
                 kernel_size=3,
                 stride=1,
                 padding=1,
@@ -505,7 +505,7 @@ class SEBlock(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(channels, self.squeezed, bias=False),
-            nn.ReLU(inplace=True),
+            nn.Mish(inplace=True),
             nn.Linear(self.squeezed, channels, bias=False),
             nn.Sigmoid()
         )
@@ -547,14 +547,15 @@ class ResidualBlock(nn.Module):
             bias,
         )
         self.se = SEBlock(out_channels, reduction=4)
+        self.mish = nn.Mish()
 
 
     def forward(self, x):
-        a = torch.relu(self.conv1(x))
+        a = self.mish(self.conv1(x))
         a = self.conv2(a)
         a = self.se(a)
         a += x
-        return torch.relu(a)
+        return self.mish(a)
 
 
 class ResNN(nn.Module):
@@ -594,19 +595,30 @@ class ResNN(nn.Module):
             padding=padding,
             bias=bias,
         )
+        self.res_block3 = ResidualBlock(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=bias,
+        )
         self.pool1 = nn.MaxPool2d(
             kernel_size=pool_kernel_size,
             stride=pool_stride,
         )
         self.bn = nn.BatchNorm2d(out_channels)
         self.dropout = nn.Dropout2d(1e-1)
-        self.linear1 = nn.Linear(1040, 12947)
-
+        self.linear1 = nn.Sequential(
+            nn.Linear(1560, 12947),
+        )
+        self.mish = nn.Mish()
 
     def forward(self, x):
-        a = self.dropout(self.pool1(torch.relu(self.conv_block(x))))
+        a = self.dropout(self.pool1(self.mish(self.conv_block(x))))
         a = self.res_block1(a)
         a = self.res_block2(a)
+        a = self.res_block3(a)
         a = self.bn(a)
         z = a.view(a.size(0), -1)
         y = self.linear1(z)
@@ -686,10 +698,9 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            # model_dir='./models/model_20221118.08.02.40',
             model_dir=None,
             teacher_model_dir=None,
-            max_episodes=115450,
+            max_episodes=577250,
             device=device,
             verbose=True,
         )
@@ -699,8 +710,10 @@ if __name__ == "__main__":
         )
     elif "test" in mode:
         history = test_model(
-            model_dir='./models/model_20220403.07.13.49',
-            # fixed_start=2709, # DEALT
+            # model_dir='./models/model_20220403.07.13.49',
+            model_dir='./models/model_20221110.18.15.58',
+            # model_dir='./models/model_20221118.08.02.40',
+            fixed_start=2709, # DEALT
             episodes="full",
         )
     else:
