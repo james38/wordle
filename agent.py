@@ -17,11 +17,11 @@ class Wordler(object):
         self.env.seed(seed)
         self.np_rng = np.random.default_rng(seed)
 
-        self.fixed_start = fixed_start
+        self.fixed = fixed_start
         self.n_inputs = 183
 
         self.alpha = 0.0003
-        self.epsilon = 0.99
+        self.epsilon = 0.5
         self.min_epsilon = 0.02
         self.gamma = 0.9999
 
@@ -85,38 +85,40 @@ class Wordler(object):
             if self.n_episodes <= n_sols:
                 C = self.modulate_C(C, warmup, C_factor, n_sols)
 
-            self.state = self.env.reset(
-                self.env.poss_solutions[sol_inds[self.n_episodes]]
-            )
+            self.env.reset(self.env.poss_solutions[sol_inds[self.n_episodes]])
             self.guessed = set()
             episode_R = 0
             is_terminal = False
             while not is_terminal:
-                state_prior = self.state.copy()
+                state_prior = self.env.state.copy()
                 if state_prior[0] > 0:
-                    valid_actions = self.env.info['valid_words'].keys()
-                    invalid_actions = {
-                        w for w in self.env.action_words.keys()
-                        if w not in valid_actions
-                    }
+                    invalid_actions = (
+                        self.env.action_words.keys()
+                        - self.env.info['valid_words'].keys()
+                    )
+                    # with all greens and yellows, last guess is not invalid,
+                    #  so updating based on prior guesses is a practical step
                     invalid_actions.update(self.guessed)
                     if invalid_batch_size > 0:
                         invalid_action_inds = self.np_rng.choice(
                             list(invalid_actions), size=invalid_batch_size
                         )
                 else:
-                    invalid_actions = list()
+                    invalid_actions = set()
 
                 self.replay_invalid_words.append(invalid_actions)
 
                 info = {'valid': False}
                 while not info['valid']:
-                    if self.fixed_start in self.env.info["valid_words"].keys():
-                        action = self.fixed_start
+                    if (
+                        self.fixed is not None
+                        and self.fixed in self.env.info["valid_words"].keys()
+                    ):
+                        action = self.fixed
                     else:
                         action = self.epsilon_greedy_action_selection(
                             self.model,
-                            self.state,
+                            self.env.state,
                             invalid_actions,
                         )
                     s_prime, R, is_terminal, info = self.env.step(action)
@@ -142,18 +144,25 @@ class Wordler(object):
                 batch_inds = self.np_rng.choice(
                     self.n_t,
                     size=n_batch_inds,
-                    p=self.gen_replay_probs(),
+                    # p=self.gen_replay_probs(),
                 )
                 batch = self.replay_memory[batch_inds,:]
+
+                # the invalid words are only used for generating Q_prime,
+                #  which is only used in non-terminal resultant states
+                cont_eps = np.argwhere(batch[:,-1] == 0)[:,0]
+                cont_inds = batch_inds[cont_eps]
                 replay_batch_invalid_words = [
-                    self.replay_invalid_words[i] for i in batch_inds
+                    self.replay_invalid_words[i] for i in cont_inds
                 ]
 
-                Q_prime = self.gamma * self.select_action(
-                    self.target_model,
-                    batch[:,self.n_inputs:-3],
-                    replay_batch_invalid_words,
-                )[1].cpu().detach().numpy().reshape(-1)
+                if cont_inds.shape[0] > 0:
+                    Q_prime = self.gamma * self.select_action(
+                        self.target_model,
+                        # batch[:,self.n_inputs:-3],
+                        self.replay_memory[cont_inds,self.n_inputs:-3],
+                        replay_batch_invalid_words,
+                    )[1].cpu().detach().numpy().reshape(-1)
 
                 if teacher_model_dir is not None:
                     # numbers chosen so that influence will exponentially decay
@@ -161,23 +170,24 @@ class Wordler(object):
                     teacher_influence = np.exp(
                         -5 * (1 + self.n_episodes) / max_episodes
                     ) - 0.164 * (self.n_episodes / max_episodes)
-                    if teacher_influence > 0:
+                    if teacher_influence > 0 and cont_inds.shape[0] > 0:
                         Q_prime = (
                             (1 - teacher_influence) * Q_prime
                             + teacher_influence * self.gamma * (
                                 self.select_action(
                                     self.teacher_model,
-                                    batch[:,self.n_inputs:-3],
+                                    # batch[:,self.n_inputs:-3],
+                                    self.replay_memory[
+                                        cont_inds, self.n_inputs:-3
+                                    ],
                                     replay_batch_invalid_words,
                                 )[1].cpu().detach().numpy().reshape(-1)
                             )
                         )
 
-                Q_vals = np.where(
-                    batch[:,-1] == 1,
-                    batch[:,-2],
-                    batch[:,-2] + Q_prime
-                )
+                Q_vals = batch[:,-2]
+                if cont_eps.shape[0] > 0:
+                    Q_vals[cont_eps] += Q_prime
 
                 if state_prior[0] > 0:
                     y_targets = torch.zeros(
@@ -221,9 +231,8 @@ class Wordler(object):
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                # for some reason, the environment's step method is already
-                #  setting the agent's self.state to the output state of step
-                # self.state = s_prime
+
+            # self.gen_secret_word_regret()
 
             self.n_episodes += 1
             self.scheduler.step()
@@ -291,9 +300,8 @@ class Wordler(object):
         )
 
         if continued:
-            new_n_t = inds.shape[0]
-            self.replay_memory[:new_n_t,:] = memory_continued
-            self.n_t = new_n_t
+            self.n_t = inds.shape[0]
+            self.replay_memory[:self.n_t,:] = memory_continued
             self.replay_invalid_words = [
                 self.replay_invalid_words[i] for i in inds
             ]
@@ -344,6 +352,11 @@ class Wordler(object):
             action = torch.argmax(out, keepdims=True, dim=1)
             best_action_value = torch.gather(out, 1, action)
         else:
+            # not sure why in the case of single entries, invalid_actions
+            #  can show up as a list containing a single element set
+            #  when using gen_secret_word_regret() method
+            # if isinstance(invalid_actions, list):
+            #     invalid_actions = invalid_actions[0]
             out[0,list(invalid_actions)] = float("-inf")
             action = torch.argmax(out).item()
             best_action_value = out[0,action]
@@ -428,6 +441,25 @@ class Wordler(object):
             ) / 100
         )
         return probs / np.sum(probs)
+
+
+    def gen_secret_word_regret(self):
+        term = self.n_t - 1 # np.argwhere(self.replay_memory[:,-1])[-1,0]
+        state_turns = self.replay_memory[term,0] # range of 0-5
+        regrets = self.replay_memory[int(term-state_turns):self.n_t,:]
+
+        regrets[:,-3] = self.env.words.index(self.env.secret_word)
+        for i in range(len(self.env.rewards)):
+            regrets[regrets[:,0] == i,-2] = self.env.rewards[i]
+        regrets[:,-1] = 1
+
+        # the state_prime will not be accurate, but should be no issue
+        eps_len = regrets.shape[0]
+        self.replay_memory[self.n_t:(self.n_t+eps_len),:] = regrets
+        self.n_t += eps_len
+        self.replay_invalid_words += self.replay_invalid_words[-eps_len:]
+
+        return None
 
 
     def create_r_per_ep_fig(
@@ -625,6 +657,27 @@ class ResNN(nn.Module):
         return y
 
 
+def run_episode(env, agent, model, fixed_start=None, secret_word=None):
+    state = env.reset(secret_word)
+    invalid_actions = set()
+    reward = 0
+    done = False
+    while not done:
+        action, a_val = agent.select_action(model, state, invalid_actions)
+        if fixed_start in env.info["valid_words"].keys():
+            action = fixed_start
+        print("guess: ", env.action_words[action], round(a_val.item(), 3))
+        state, R, done, info = env.step(action)
+        invalid_actions = (
+            env.action_words.keys() - env.info['valid_words'].keys()
+        )
+        invalid_actions.add(action)
+        reward += R
+
+    print("secret word: ", env.secret_word, f"reward: {round(reward, 2)}")
+    return reward
+
+
 def test_model(model_dir, episodes=100, fixed_start=None, verbose=True):
     model = torch.load(model_dir)
 
@@ -632,34 +685,14 @@ def test_model(model_dir, episodes=100, fixed_start=None, verbose=True):
 
     agent.env = WordleEnv()
 
-    def run_episode(env, agent, model, secret_word=None):
-        state = env.reset(secret_word)
-        invalid_actions = set()
-        reward = 0
-        done = False
-        while not done:
-            action, a_val = agent.select_action(model, state, invalid_actions)
-            if fixed_start in env.info["valid_words"].keys():
-                action = fixed_start
-            print("guess: ", env.action_words[action], round(a_val.item(), 3))
-            state, R, done, info = env.step(action)
-            invalid_actions = {
-                w for w in env.action_words.keys()
-                if w not in env.info["valid_words"].keys()
-            }
-            invalid_actions.add(action)
-            reward += R
-
-        print("secret word: ", env.secret_word, f"reward: {round(reward, 2)}")
-        return reward
-
     if isinstance(episodes, int):
         history = [
-            run_episode(agent.env, agent, model) for _ in range(episodes)
+            run_episode(agent.env, agent, model, fixed_start)
+            for _ in range(episodes)
         ]
     else:
         history = [
-            run_episode(agent.env, agent, model, secret_word)
+            run_episode(agent.env, agent, model, fixed_start, secret_word)
             for secret_word in agent.env.poss_solutions
         ]
 
@@ -698,7 +731,7 @@ if __name__ == "__main__":
     mode = "train-test"
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
-            model_dir=None,
+            model_dir='models/model_20230220.07.59.22',
             teacher_model_dir=None,
             max_episodes=577250,
             device=device,
@@ -711,8 +744,7 @@ if __name__ == "__main__":
     elif "test" in mode:
         history = test_model(
             # model_dir='./models/model_20220403.07.13.49',
-            model_dir='./models/model_20221110.18.15.58',
-            # model_dir='./models/model_20221118.08.02.40',
+            model_dir='./models/model_20221118.08.02.40',
             fixed_start=2709, # DEALT
             episodes="full",
         )
