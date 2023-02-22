@@ -205,8 +205,7 @@ class WordleEnv(gym.Env):
         if guess == self.secret_word:
             self.reward = self.rewards[self.n_guesses - 1]
             self.done = True
-
-        if self.n_guesses == self.max_attempts:
+        elif self.n_guesses == self.max_attempts:
             self.done = True
 
         # get char metadata
