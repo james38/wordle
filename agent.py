@@ -21,10 +21,13 @@ class Wordler(object):
         self.fixed = fixed_start
         self.n_inputs = 183
 
-        self.alpha = 0.001
+        self.alpha = 0.0003
         self.epsilon = 0.99
         self.min_epsilon = 0.02
         self.gamma = 0.9999
+
+        self.p_alpha = 0.6
+        self.p_beta = 0.4
 
         self.device = device
         self.EPS = 1e-3
@@ -37,7 +40,7 @@ class Wordler(object):
         max_episodes=1,
         C=8,
         batch_size=64,
-        max_experience=100000,
+        max_exp=30000,
         clip_val=2,
         warmup=2,
         C_factor=2,
@@ -63,7 +66,7 @@ class Wordler(object):
             p.register_hook(lambda x: torch.clamp(x, -clip_val, clip_val))
         self.target_model = deepcopy(self.model)
         self.C = C
-        self.loss_fx = nn.MSELoss()
+        self.loss_fx = nn.MSELoss(reduction='none')
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.alpha,
@@ -75,9 +78,10 @@ class Wordler(object):
             T_max=T_max,
         )
 
-        self.initialize_replay_memory(n=max_experience)
+        self.init_replay_memory_buffer(n=max_exp)
         self.initialize_epsilon_decay(max_episodes)
 
+        beta_inc = (1 - self.p_beta) / max_episodes
         self.n_episodes = 0
         n_sols = len(self.env.poss_solutions)
         sol_inds = self.shuffle_solutions(n_sols, max_episodes)
@@ -94,7 +98,7 @@ class Wordler(object):
             while not is_terminal:
                 state_prior = self.env.state.copy()
                 invalid_actions = self.gen_invalid_actions(state_prior)
-                self.replay_invalid_words.append(invalid_actions)
+                self.replay_invalid_words[self.n_t % max_exp] = invalid_actions
 
                 info = {'valid': False}
                 while not info['valid']:
@@ -117,18 +121,23 @@ class Wordler(object):
 
                 episode_R += R
 
-                self.replay_memory[self.n_t,:self.n_inputs] = state_prior
-                self.replay_memory[self.n_t,self.n_inputs:-4] = s_prime
-                self.replay_memory[self.n_t,-4] = self.EPS
-                self.replay_memory[self.n_t,-3] = action
-                self.replay_memory[self.n_t,-2] = R
-                self.replay_memory[self.n_t,-1] = 1 if is_terminal else 0
+                r_i = self.n_t % max_exp
+                self.replay_memory[r_i,:self.n_inputs] = state_prior
+                self.replay_memory[r_i,self.n_inputs:-4] = s_prime
+                self.replay_memory[r_i,-4] = self.EPS
+                self.replay_memory[r_i,-3] = action
+                self.replay_memory[r_i,-2] = R
+                self.replay_memory[r_i,-1] = 1 if is_terminal else 0
                 self.n_t += 1
 
+                n_replay_buff = min(self.n_t, max_exp)
+                probs, imp_sample_wt = self.prioritized_replay(n_replay_buff)
                 batch_inds = self.np_rng.choice(
-                    self.n_t,
+                    n_replay_buff,
                     size=batch_size,
+                    p=probs,
                 )
+                self.p_beta += beta_inc
                 batch = self.replay_memory[batch_inds,:]
 
                 # the invalid words are only used for generating Q_prime,
@@ -179,7 +188,15 @@ class Wordler(object):
                     torch.tensor(batch[:,-3].astype(int)).view(-1,1).to(device)
                 )
 
+                self.replay_memory[batch_inds,-4] = np.maximum(1e-6, torch.abs(
+                    y_targets - y_preds
+                ).cpu().detach().numpy().reshape(-1))
+
                 loss = self.loss_fx(y_preds, y_targets)
+                loss *= torch.tensor(
+                    imp_sample_wt[batch_inds], device=self.device
+                ).view(-1,1)
+                loss = torch.mean(loss)
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -193,19 +210,16 @@ class Wordler(object):
 
             overall_rewards.append(episode_R)
             if (self.n_episodes % 100 == 0):
-                logging.info(f"replay memory: {self.n_t}")
+                logging.debug(f"replay memory: {self.n_t}")
                 logging.info(f"episode {self.n_episodes}")
                 mean_reward = np.mean(overall_rewards[-100:]).round(3)
                 logging.info(f"last 100 episode rewards {mean_reward}")
 
             if (self.n_episodes % C) == 0:
                 self.target_model = deepcopy(self.model)
-            if (self.n_episodes % (2 * n_sols)) == 0:
-                self.initialize_replay_memory(n=max_experience, continued=True)
             if self.n_episodes == int(max_episodes / 2):
                 fsufx = dt.datetime.now().strftime("%Y%m%d.%H.%M.%S")
                 torch.save(self.model, f'./models/model_halftrain_{fsufx}')
-
 
             if self.q_val_converged():
                 is_solved = True
@@ -273,6 +287,20 @@ class Wordler(object):
         else:
             self.n_t = 0
             self.replay_invalid_words = list()
+
+        return None
+
+
+    def init_replay_memory_buffer(self, n):
+        # create as array of maximum experience rows
+        self.replay_memory = np.zeros(
+            (
+                n, # experiences to track in replay memory
+                2 * self.n_inputs + 4 # two states, action, reward, done, TDerr
+            )
+        )
+        self.n_t = 0
+        self.replay_invalid_words = [set() for _ in range(n)]
 
         return None
 
@@ -428,6 +456,14 @@ class Wordler(object):
             ) / 100
         )
         return probs / np.sum(probs)
+
+
+    def prioritized_replay(self, n):
+        adj_gamma = self.replay_memory[:n,-4]**self.p_alpha
+        priority = adj_gamma / np.sum(adj_gamma)
+        imp_sample_wt = (n * priority)**-self.p_beta
+        imp_sample_wt = imp_sample_wt / np.max(imp_sample_wt)
+        return priority, imp_sample_wt
 
 
     def teacher_influence(self, max_episodes):
@@ -729,7 +765,8 @@ if __name__ == "__main__":
     if "train" in mode and "test" in mode:
         agent, fsufx = main(
             max_episodes=577250,
-            model_dir='models/model_20230223.22.15.43',
+            # model_dir='models/model_20230223.22.15.43',
+            model_dir=None,
             teacher_model_dir=None,
             device=device,
         )
