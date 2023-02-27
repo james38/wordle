@@ -27,6 +27,7 @@ class Wordler(object):
         self.gamma = 0.9999
 
         self.device = device
+        self.EPS = 1e-3
 
 
     def solve(
@@ -117,7 +118,8 @@ class Wordler(object):
                 episode_R += R
 
                 self.replay_memory[self.n_t,:self.n_inputs] = state_prior
-                self.replay_memory[self.n_t,self.n_inputs:-3] = s_prime
+                self.replay_memory[self.n_t,self.n_inputs:-4] = s_prime
+                self.replay_memory[self.n_t,-4] = self.EPS
                 self.replay_memory[self.n_t,-3] = action
                 self.replay_memory[self.n_t,-2] = R
                 self.replay_memory[self.n_t,-1] = 1 if is_terminal else 0
@@ -138,38 +140,39 @@ class Wordler(object):
                 ]
 
                 if cont_inds.shape[0] > 0:
-                    Q_prime = self.gamma * self.select_action(
-                        self.target_model,
-                        self.replay_memory[cont_inds,self.n_inputs:-3],
+                    model_actions = self.select_action(
+                        self.model,
+                        self.replay_memory[cont_inds,self.n_inputs:-4],
                         replay_batch_invalid_words,
-                    )[1].cpu().detach().numpy().reshape(-1)
+                    )[0]
+                    input_prime = self.batch_to_input(
+                        self.replay_memory[cont_inds,self.n_inputs:-4]
+                    )
+                    Q_prime = self.gamma * torch.gather(
+                        self.target_model(input_prime),
+                        1,
+                        model_actions
+                    ).view(-1,1)
 
-                if teacher_model_dir is not None:
-                    teacher_influence = self.gen_teacher_influence(max_episodes)
-                    if teacher_influence > 0 and cont_inds.shape[0] > 0:
-                        Q_prime = (
-                            (1 - teacher_influence) * Q_prime
-                            + teacher_influence * self.gamma * (
-                                self.select_action(
-                                    self.teacher_model,
-                                    self.replay_memory[
-                                        cont_inds, self.n_inputs:-3
-                                    ],
-                                    replay_batch_invalid_words,
-                                )[1].cpu().detach().numpy().reshape(-1)
+                    if teacher_model_dir is not None:
+                        teacher_influence = self.teacher_influence(max_episodes)
+                        if teacher_influence > 0:
+                            Q_prime = (
+                                (1 - teacher_influence) * Q_prime
+                                + teacher_influence * self.gamma * torch.gather(
+                                    self.teacher_model(input_prime),
+                                    1,
+                                    model_actions
+                                ).view(-1,1)
                             )
-                        )
-
-                Q_vals = batch[:,-2]
-                if cont_eps.shape[0] > 0:
-                    Q_vals[cont_eps] += Q_prime
 
                 y_targets = torch.tensor(
-                    Q_vals, device=self.device
+                    batch[:,-2], device=self.device
                 ).float().view(-1,1)
+                if cont_eps.shape[0] > 0:
+                    y_targets[cont_eps] += Q_prime
 
                 input = self.batch_to_input(batch[:,:self.n_inputs])
-
                 y_preds = torch.gather(
                     self.model(input),
                     1,
@@ -257,7 +260,7 @@ class Wordler(object):
         self.replay_memory = np.zeros(
             (
                 n, # experiences to track in replay memory
-                2 * self.n_inputs + 3 # two states, one action, reward, done
+                2 * self.n_inputs + 4 # two states, action, reward, done, TDerr
             )
         )
 
@@ -427,7 +430,7 @@ class Wordler(object):
         return probs / np.sum(probs)
 
 
-    def gen_teacher_influence(self, max_episodes):
+    def teacher_influence(self, max_episodes):
         """
         numbers chosen so that influence will exponentially decay
          plus a bit of linear decay to hit 0 at roughly halfway
