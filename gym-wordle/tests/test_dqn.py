@@ -54,7 +54,7 @@ def test_resnn_checkpoint_roundtrip(tmp_path, env):
 import os
 
 from gym_wordle.agents.common import invalid_from_mask
-from gym_wordle.agents.dqn import DQNTrainer, run_episode
+from gym_wordle.agents.dqn import DQNTrainer, main, run_episode
 
 
 def make_trainer(env, tmp_path, **kw):
@@ -144,3 +144,32 @@ def test_run_episode_terminates_with_valid_guesses(env, tmp_path):
     total = run_episode(t, t.model, secret_word="apple")
     assert 0.0 <= total <= 1.0
     assert env.terminated
+
+
+def test_main_eval_only_requires_checkpoint(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--eval-only"])
+    assert exc.value.code == 2
+    assert "--eval-only requires --checkpoint" in capsys.readouterr().err
+
+
+def test_learn_handles_mixed_terminal_and_nonterminal_batch(env):
+    trainer = DQNTrainer(env, device="cpu", channels=2)
+    trainer.setup(max_episodes=2, batch_size=4, max_exp=64)
+    env.reset(options={"secret_word": "apple"})
+    obs, info = env.reset(options={"secret_word": "apple"})
+    # one non-terminal transition
+    a = env.word_to_action["crane"]
+    obs2, r, term, _, info2 = env.step(a)
+    trainer.buffer.add(obs, a, r, obs2, term, invalid_from_mask(info2["action_mask"]))
+    # one terminal (winning) transition
+    a_win = env.word_to_action["apple"]
+    obs3, r3, term3, _, info3 = env.step(a_win)
+    assert term3 and r3 > 0
+    trainer.buffer.add(obs2, a_win, r3, obs3, term3, invalid_from_mask(info3["action_mask"]))
+    # pad so the batch has both kinds
+    for _ in range(2):
+        trainer.buffer.add(obs, a, r, obs2, term, invalid_from_mask(info2["action_mask"]))
+    loss = trainer.learn()
+    assert np.isfinite(loss)
+    assert np.isfinite(trainer.buffer.priority[: len(trainer.buffer)]).all()

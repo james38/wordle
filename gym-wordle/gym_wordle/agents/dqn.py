@@ -439,6 +439,8 @@ def main(argv=None):
     parser.add_argument("--model-dir", default="models")
     parser.add_argument("--batch-size", type=int, default=64)
     args = parser.parse_args(argv)
+    if args.eval_only and not args.checkpoint:
+        parser.error("--eval-only requires --checkpoint")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     env = WordleEnv()
