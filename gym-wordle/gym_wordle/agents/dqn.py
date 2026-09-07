@@ -88,6 +88,33 @@ class ResidualBlock(nn.Module):
         return self.mish(a + x)
 
 
+class FactoredHead(nn.Module):
+    """Two-tower bilinear Q head: Q(s, w) = state_proj(z) . word_tower(phi(w)).
+
+    phi(w) is a fixed per-word feature vector (one-hot letter per position,
+    then letter counts). It is a buffer, so a checkpoint carries it and a
+    freshly constructed model can start from zeros and be filled by
+    load_state_dict.
+    """
+
+    def __init__(self, in_dim, n_actions, n_letters, d, word_features=None):
+        super().__init__()
+        n_feat = N_ALPHABET * n_letters + N_ALPHABET
+        if word_features is None:
+            word_features = torch.zeros(n_actions, n_feat)
+        assert tuple(word_features.shape) == (n_actions, n_feat), word_features.shape
+        self.register_buffer("word_features", word_features.float())
+        self.state_proj = nn.Linear(in_dim, d)
+        self.word_tower = nn.Sequential(
+            nn.Linear(n_feat, d), nn.Mish(), nn.Linear(d, d)
+        )
+
+    def forward(self, z):
+        h = self.state_proj(z)                    # (B, d)
+        u = self.word_tower(self.word_features)   # (N, d), shared across words
+        return h @ u.T                            # (B, N)
+
+
 class ResNN(nn.Module):
     """Conv trunk over the (letter x position) grid, then a Q head over words."""
 
@@ -114,6 +141,8 @@ class ResNN(nn.Module):
         flat_dim = channels * N_ALPHABET * n_letters
         if head == "flat":
             self.head = nn.Linear(flat_dim, n_actions)
+        elif head == "factored":
+            self.head = FactoredHead(flat_dim, n_actions, n_letters, d_head, word_features)
         else:
             raise ValueError(f"unknown head {head!r}")
         self.ctor_kwargs = dict(
@@ -180,12 +209,15 @@ class DQNTrainer:
     # -- model -------------------------------------------------------------
 
     def build_model(self):
-        return ResNN(
+        kwargs = dict(
             n_actions=self.n_actions,
             n_letters=self.env.n_letters,
             channels=self.channels,
             head=self.head,
-        ).to(self.device)
+        )
+        if self.head == "factored":
+            kwargs["word_features"] = word_feature_matrix(self.env.words, self.env.n_letters)
+        return ResNN(**kwargs).to(self.device)
 
     def q_values(self, model, obs):
         """Q(s, .) in eval mode under no_grad. Restores the model's prior mode."""
@@ -429,7 +461,7 @@ def evaluate(trainer, model, secret_words=None, episodes=100):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Train or evaluate the SE-ResNet DQN on Wordle")
     parser.add_argument("--episodes", type=int, default=4618)
-    parser.add_argument("--head", choices=["flat"], default="flat")
+    parser.add_argument("--head", choices=["flat", "factored"], default="flat")
     parser.add_argument("--channels", type=int, default=12)
     parser.add_argument("--fixed-start", default=None, help="opening word, e.g. dealt")
     parser.add_argument("--checkpoint", default=None, help="resume from this .pt file")

@@ -173,3 +173,58 @@ def test_learn_handles_mixed_terminal_and_nonterminal_batch(env):
     loss = trainer.learn()
     assert np.isfinite(loss)
     assert np.isfinite(trainer.buffer.priority[: len(trainer.buffer)]).all()
+
+
+from gym_wordle.agents.common import word_feature_matrix
+from gym_wordle.agents.dqn import FactoredHead
+
+
+def test_factored_head_output_matches_flat_shape(env):
+    phi = word_feature_matrix(env.words, 5)
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
+    assert m(torch.zeros(3, 4, 26, 5)).shape == (3, 19)
+    assert m.ctor_kwargs["head"] == "factored"
+    assert "word_features" not in m.ctor_kwargs  # lives in the state_dict instead
+
+
+def test_factored_head_distinguishes_anagrams(env):
+    phi = word_feature_matrix(env.words, 5)
+    torch.manual_seed(0)
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
+    q = m(torch.randn(1, 4, 26, 5))
+    i, j = env.word_to_action["stale"], env.word_to_action["slate"]
+    assert q[0, i] != q[0, j]
+
+
+def test_factored_head_parameter_budget():
+    n_actions = 12947
+    factored = ResNN(n_actions=n_actions, head="factored", word_features=torch.zeros(n_actions, 156))
+    flat = ResNN(n_actions=n_actions)
+    n_factored = sum(p.numel() for p in factored.head.parameters())
+    n_flat = sum(p.numel() for p in flat.head.parameters())
+    assert n_factored < 500_000
+    assert n_flat > 20_000_000
+
+
+def test_factored_checkpoint_restores_word_features(tmp_path, env):
+    phi = word_feature_matrix(env.words, 5)
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
+    save_checkpoint(m, str(tmp_path / "f.pt"))
+    m2 = load_checkpoint(ResNN, str(tmp_path / "f.pt"), CPU).eval()
+    assert torch.equal(m2.head.word_features, phi)
+    x = torch.randn(2, 4, 26, 5)
+    assert torch.allclose(m(x), m2(x))
+
+
+def test_trainer_builds_factored_model_with_env_words(env, tmp_path):
+    t = make_trainer(env, tmp_path, head="factored")
+    t.setup(max_episodes=1, batch_size=1, max_exp=8)
+    assert isinstance(t.model.head, FactoredHead)
+    assert torch.equal(t.model.head.word_features, word_feature_matrix(env.words, 5))
+    model, path = t.solve(max_episodes=2, batch_size=2, max_exp=16)
+    assert os.path.exists(path)
+
+
+def test_unknown_head_rejected():
+    with pytest.raises(ValueError):
+        ResNN(n_actions=18, head="bilinear")
