@@ -156,8 +156,32 @@ class WordleEnv(gym.Env):
         return self._legal & ~self._guessed
 
     def _hard_mode_mask(self):
-        """Which words satisfy hard mode given the current state. Task 3."""
-        return np.ones(len(self.words), dtype=bool)
+        """Boolean mask over all words: which satisfy hard mode right now.
+
+        1. A green letter must be kept at its position.
+        2. An overused letter (grey, or every copy already green) may only
+           appear at positions where it is green.
+        3. A letter with a known yellow must appear at least
+           1 + (its greens) times.
+        The first guess is exempt: before any guess the state is all zeros
+        and every rule is vacuous, so the mask is all True.
+        """
+        ok = np.ones(len(self.words), dtype=bool)
+        pos = self._state[self.POS : self.EXCEEDED].reshape(N_ALPHABET, self.n_letters)
+        overused = np.array(
+            sorted(LETTER_INDEX[c] for c in self.overused_letters), dtype=np.int8
+        )
+        for i in range(self.n_letters):
+            greens = np.flatnonzero(pos[:, i] == 2)
+            if greens.size:
+                ok &= self.word_letters[:, i] == greens[0]
+            elif overused.size:
+                ok &= ~np.isin(self.word_letters[:, i], overused)
+        has_yellow = (pos == 1).any(axis=1)
+        n_green = (pos == 2).sum(axis=1)
+        for letter in np.flatnonzero(has_yellow):
+            ok &= self.word_counts[:, letter] >= 1 + n_green[letter]
+        return ok
 
     def _pos_slice(self, letter):
         """Writable view of the n_letters positional slots for `letter`."""

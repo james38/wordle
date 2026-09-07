@@ -165,3 +165,109 @@ def test_step_after_termination_raises(env_paths):
     env.step(action(env, "apple"))
     with pytest.raises(AssertionError):
         env.step(action(env, "crane"))
+
+
+# --- hard mode ----------------------------------------------------------------
+
+def test_first_guess_is_never_rejected(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "apple"})
+    assert env._action_mask().all()
+
+
+def test_hard_mode_rejection_leaves_state_and_turn_unchanged(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "apple"})
+    obs1, *_ = env.step(action(env, "crane"))  # a yellow, e green at 4
+    obs2, r, term, trunc, info = env.step(action(env, "puppy"))  # no a, no e
+    assert info["valid"] is False
+    assert r == 0.0 and term is False
+    assert env.n_guesses == 1 and obs2[0] == 1
+    assert np.array_equal(obs1, obs2)
+    assert action(env, "puppy") not in info["valid_words"]
+    assert not info["action_mask"][action(env, "puppy")]
+
+
+def test_greens_must_be_kept_in_place(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "apple"})
+    _, _, _, _, info = env.step(action(env, "ample"))  # a?ple
+    assert set(info["valid_words"].values()) == {"apple"}
+
+
+def test_grey_letter_may_not_be_reused(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "apple"})
+    _, _, _, _, info = env.step(action(env, "crane"))  # c, r, n grey
+    legal = set(info["valid_words"].values())
+    # cable and table both keep e at 4 and contain a; only c is grey
+    assert "table" in legal
+    assert "cable" not in legal
+
+
+def test_yellow_letters_must_be_reused(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "apple"})
+    _, _, _, _, info = env.step(action(env, "crane"))  # a yellow, e green at 4
+    legal = set(info["valid_words"].values())
+    assert {"apple", "ample", "maple", "stale", "plate", "table"} <= legal
+    assert "happy" not in legal  # has a, but no e at 4
+    assert "least" not in legal  # has a and e, but e is not at 4
+    assert "stone" not in legal  # no a
+
+
+def test_accepted_guess_is_removed_from_valid_words(env_paths):
+    env = make_env(env_paths)
+    env.reset(options={"secret_word": "delta"})
+    _, _, _, _, info = env.step(action(env, "dealt"))  # d,e green; a,l,t yellow
+    assert env._hard_mode_mask()[action(env, "dealt")]  # still hard-mode legal
+    assert action(env, "dealt") not in info["valid_words"]
+    assert not info["action_mask"][action(env, "dealt")]
+    _, _, _, _, info2 = env.step(action(env, "dealt"))
+    assert info2["valid"] is False and env.n_guesses == 1
+
+
+def test_valid_words_matches_acceptance_rule(env_paths):
+    env = make_env(env_paths)
+    for secret in env.solutions:
+        for opener in ["crane", "puppy", "paper", "dealt", "stale"]:
+            env.reset(options={"secret_word": secret})
+            if opener == secret:
+                continue
+            _, _, _, _, info = env.step(action(env, opener))
+            mask = info["action_mask"]
+            for a in range(env.action_space.n):
+                probe = make_env(env_paths)
+                probe.reset(options={"secret_word": secret})
+                probe.step(action(probe, opener))
+                _, _, _, _, probe_info = probe.step(a)
+                assert probe_info["valid"] == bool(mask[a]), (secret, opener, env.words[a])
+
+
+def test_secret_word_is_always_legal(env_paths):
+    env = make_env(env_paths)
+    for secret in env.solutions:
+        for opener in ["crane", "puppy", "paper", "dealt"]:
+            env.reset(options={"secret_word": secret})
+            if opener == secret:
+                continue
+            _, _, _, _, info = env.step(action(env, opener))
+            assert info["action_mask"][action(env, secret)]
+
+
+# --- registration and checker -------------------------------------------------
+
+def test_registered_with_gymnasium(env_paths):
+    import gymnasium
+    import gym_wordle  # noqa: F401  registers Wordle-v0
+
+    env = gymnasium.make("Wordle-v0", **env_paths)
+    obs, info = env.reset(seed=0)
+    assert obs.shape == (183,)
+    assert isinstance(env.unwrapped, WordleEnv)
+
+
+def test_passes_gymnasium_env_checker(env_paths):
+    from gymnasium.utils.env_checker import check_env
+
+    check_env(make_env(env_paths), skip_render_check=True)
