@@ -1,5 +1,6 @@
-*.json
 **/__pycache__/
 *.png
 **/checkpoints/
-model_*
+**/models/
+.venv/
+.superpowers/
