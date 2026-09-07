@@ -246,29 +246,31 @@ def reference_legal(secret, guesses, word):
     """Hard-mode rule written independently of the env's state encoding.
 
     1. Every green position is fixed.
-    2. A letter that ever came back grey may not appear at a non-green position.
+    2. A letter is exhausted once a guess shows a grey copy of it and no
+       yellow copy (all of its copies in the secret are then green); an
+       exhausted letter may not appear at a non-green position.
     3. The word must contain each letter at least max over guesses of
        (greens + yellows for that letter in that guess) times.
     """
     greens = {}
-    grey = set()
+    exhausted = set()
     required = {}
     for g in guesses:
         fb = wordle_feedback(secret, g)
         for p, (c, f) in enumerate(zip(g, fb)):
             if f == "g":
                 greens[p] = c
-            elif f == ".":
-                grey.add(c)
-        counts = {}
-        for c, f in zip(g, fb):
-            if f != ".":
-                counts[c] = counts.get(c, 0) + 1
-        for c, n in counts.items():
-            required[c] = max(required.get(c, 0), n)
+        letters = set(g)
+        for c in letters:
+            marks = [f for gc, f in zip(g, fb) if gc == c]
+            if "." in marks and "y" not in marks:
+                exhausted.add(c)
+            n = sum(1 for f in marks if f != ".")
+            if n:
+                required[c] = max(required.get(c, 0), n)
     if any(word[p] != c for p, c in greens.items()):
         return False
-    if any(word[p] in grey for p in range(len(word)) if p not in greens):
+    if any(word[p] in exhausted for p in range(len(word)) if p not in greens):
         return False
     return all(word.count(c) >= n for c, n in required.items())
 
@@ -284,9 +286,8 @@ def test_valid_words_matches_acceptance_rule(env_paths):
             env.reset(options={"secret_word": secret})
             _, _, _, _, info = env.step(action(env, opener))
             for a in range(env.action_space.n):
-                assert bool(info["action_mask"][a]) == reference_legal(
-                    secret, [opener], env.words[a]
-                ), (secret, [opener], env.words[a])
+                expected = reference_legal(secret, [opener], env.words[a]) and env.words[a] != opener
+                assert bool(info["action_mask"][a]) == expected, (secret, [opener], env.words[a])
             second_guesses = [env.words[a] for a in np.flatnonzero(info["action_mask"]) if env.words[a] != secret]
             for second in second_guesses:
                 env.reset(options={"secret_word": secret})
