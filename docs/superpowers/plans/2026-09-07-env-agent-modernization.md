@@ -2581,8 +2581,8 @@ git commit -m "feat(dqn): optional factored two-tower Q head sharing weights acr
 ```markdown
 # Wordle Environment and Agents
 
-A gymnasium environment for Wordle with a strict hard mode, and two
-PyTorch Double-DQN trainers.
+A gymnasium environment for Wordle with a strict hard mode, a Double-DQN
+trainer on an SE-ResNet, and a plain DQN trainer on a transformer.
 
 ## Layout
 
