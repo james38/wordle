@@ -220,14 +220,14 @@ def test_action_space_is_sorted_union_of_both_files(env_paths):
     assert env.words == sorted(set(env.words))
     assert set(env.solutions) <= set(env.words)
     assert len(env.words) == 19  # 15 valids + 5 solutions, 'stale' shared
-    assert env.action_space.n == 18
+    assert env.action_space.n == 19
     assert all(env.word_to_action[w] == i for i, w in enumerate(env.words))
 
 
 def test_letter_matrix_shapes_and_counts(env_paths):
     env = make_env(env_paths)
-    assert env.word_letters.shape == (18, 5)
-    assert env.word_counts.shape == (18, 26)
+    assert env.word_letters.shape == (19, 5)
+    assert env.word_counts.shape == (19, 26)
     a = action(env, "apple")
     assert env.word_counts[a, LETTER_INDEX["p"]] == 2
     assert env.word_counts[a].sum() == 5
@@ -269,7 +269,7 @@ def test_reset_returns_zero_obs_copy_and_info(env_paths):
     assert info["n_guesses"] == 0
     assert info["secret_word"] in env.solutions
     assert info["action_mask"].dtype == bool and info["action_mask"].all()
-    assert set(info["valid_words"]) == set(range(18))
+    assert set(info["valid_words"]) == set(range(19))
 
 
 def test_reset_with_seed_is_reproducible(env_paths):
@@ -1217,9 +1217,9 @@ def test_resnn_flat_output_shape_and_kwargs(env):
     m = ResNN(n_actions=env.action_space.n, channels=4)
     x = torch.zeros(3, 4, 26, 5)
     assert m(x).shape == (3, env.action_space.n)
-    assert m.ctor_kwargs["head"] == "flat" and m.ctor_kwargs["n_actions"] == 18
+    assert m.ctor_kwargs["head"] == "flat" and m.ctor_kwargs["n_actions"] == 19
     m.eval()
-    assert m(torch.zeros(1, 4, 26, 5)).shape == (1, 18)  # batch of one in eval
+    assert m(torch.zeros(1, 4, 26, 5)).shape == (1, 19)  # batch of one in eval
 
 
 def test_resnn_batch_of_one_in_train_mode(env):
@@ -2412,8 +2412,8 @@ from gym_wordle.agents.dqn import FactoredHead
 
 def test_factored_head_output_matches_flat_shape(env):
     phi = word_feature_matrix(env.words, 5)
-    m = ResNN(n_actions=18, channels=4, head="factored", word_features=phi).eval()
-    assert m(torch.zeros(3, 4, 26, 5)).shape == (3, 18)
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
+    assert m(torch.zeros(3, 4, 26, 5)).shape == (3, 19)
     assert m.ctor_kwargs["head"] == "factored"
     assert "word_features" not in m.ctor_kwargs  # lives in the state_dict instead
 
@@ -2421,7 +2421,7 @@ def test_factored_head_output_matches_flat_shape(env):
 def test_factored_head_distinguishes_anagrams(env):
     phi = word_feature_matrix(env.words, 5)
     torch.manual_seed(0)
-    m = ResNN(n_actions=18, channels=4, head="factored", word_features=phi).eval()
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
     q = m(torch.randn(1, 4, 26, 5))
     i, j = env.word_to_action["stale"], env.word_to_action["slate"]
     assert q[0, i] != q[0, j]
@@ -2439,7 +2439,7 @@ def test_factored_head_parameter_budget():
 
 def test_factored_checkpoint_restores_word_features(tmp_path, env):
     phi = word_feature_matrix(env.words, 5)
-    m = ResNN(n_actions=18, channels=4, head="factored", word_features=phi).eval()
+    m = ResNN(n_actions=19, channels=4, head="factored", word_features=phi).eval()
     save_checkpoint(m, str(tmp_path / "f.pt"))
     m2 = load_checkpoint(ResNN, str(tmp_path / "f.pt"), CPU).eval()
     assert torch.equal(m2.head.word_features, phi)
