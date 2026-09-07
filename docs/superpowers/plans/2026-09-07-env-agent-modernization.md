@@ -82,13 +82,13 @@ touch gym_wordle/agents/__init__.py tests/__init__.py
 `tests/fixtures/words_small.json`:
 
 ```json
-["apple", "crane", "slate", "maple", "delta"]
+["apple", "crane", "stale", "maple", "delta"]
 ```
 
 `tests/fixtures/valids_small.json`:
 
 ```json
-["puppy", "paper", "dealt", "ample", "pupae", "apply", "happy", "least", "stale", "plate", "stone", "tales", "cable", "table"]
+["puppy", "paper", "dealt", "ample", "pupae", "apply", "happy", "least", "stale", "plate", "stone", "tales", "slate", "cable", "table"]
 ```
 
 Note `stale` is a solution and `slate`, `least`, `tales` are anagrams of it; `dealt` and `delta` are anagrams; `cable` and `table` differ only in a letter that `crane` reveals as grey against `apple`. Tests rely on these words.
@@ -219,7 +219,7 @@ def test_action_space_is_sorted_union_of_both_files(env_paths):
     env = make_env(env_paths)
     assert env.words == sorted(set(env.words))
     assert set(env.solutions) <= set(env.words)
-    assert len(env.words) == 18  # 14 valids + 5 solutions, 'stale' shared
+    assert len(env.words) == 19  # 15 valids + 5 solutions, 'stale' shared
     assert env.action_space.n == 18
     assert all(env.word_to_action[w] == i for i, w in enumerate(env.words))
 
