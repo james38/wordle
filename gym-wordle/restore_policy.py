@@ -1,3 +1,5 @@
+# STALE: written against Ray 1.x RLlib and OpenAI gym. Not ported to the
+# gymnasium WordleEnv; kept for reference. See README.md.
 import os
 
 import gym
