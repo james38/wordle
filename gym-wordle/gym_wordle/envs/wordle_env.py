@@ -162,7 +162,7 @@ class WordleEnv(gym.Env):
         2. An overused letter (grey, or every copy already green) may only
            appear at positions where it is green.
         3. A letter with a known yellow must appear at least
-           1 + (its greens) times.
+           (its tracked yellows, at least 1) + (its greens) times.
         The first guess is exempt: before any guess the state is all zeros
         and every rule is vacuous, so the mask is all True.
         """
@@ -179,8 +179,10 @@ class WordleEnv(gym.Env):
                 ok &= ~np.isin(self.word_letters[:, i], overused)
         has_yellow = (pos == 1).any(axis=1)
         n_green = (pos == 2).sum(axis=1)
+        yellows = self._state[self.YELLOWS : self.YELLOWS + N_ALPHABET]
         for letter in np.flatnonzero(has_yellow):
-            ok &= self.word_counts[:, letter] >= 1 + n_green[letter]
+            need = max(int(yellows[letter]), 1) + int(n_green[letter])
+            ok &= self.word_counts[:, letter] >= need
         return ok
 
     def _pos_slice(self, letter):
