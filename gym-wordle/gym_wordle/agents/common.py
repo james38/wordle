@@ -17,13 +17,16 @@ def masked_argmax(q, invalid):
     """Greedy action and its value after masking invalid actions with -inf.
 
     q: (B, N) tensor.
-    invalid: one 1-D integer array applied to every row, or a list/tuple of
-    B such arrays (one per row). Dispatch is on the type of `invalid`, so a
-    batch of size one with a one-element list works.
+    invalid: one 1-D integer array applied to every row, a list/tuple of B
+    such arrays (one per row), or a (B, N) bool tensor (True = invalid).
+    Dispatch is on the type of `invalid`, so a batch of size one with a
+    one-element list works.
     Returns (actions (B,1) int64, values (B,1)).
     """
     q = q.clone()
-    if isinstance(invalid, (list, tuple)):
+    if isinstance(invalid, torch.Tensor) and invalid.dtype == torch.bool:
+        q.masked_fill_(invalid, float("-inf"))
+    elif isinstance(invalid, (list, tuple)):
         assert len(invalid) == q.shape[0], "one invalid array per row"
         for row, inv in enumerate(invalid):
             inv = np.asarray(inv, dtype=np.int64)
@@ -40,13 +43,17 @@ def masked_argmax(q, invalid):
 class ReplayBuffer:
     """Ring buffer of transitions with optional proportional prioritization.
 
-    `invalid_next[i]` holds the actions that are invalid in `next_state[i]`
-    (already guessed or hard-mode illegal). It is used only to mask the
-    bootstrap argmax over `next_state`.
+    `legal_next[i]` (bit-packed with `np.packbits`) holds the actions that
+    are legal in `next_state[i]` (not yet guessed and not hard-mode
+    illegal). It is used only to mask the bootstrap argmax over
+    `next_state`; unpack a row (or rows) with `legal_mask`. Packing keeps
+    per-row storage at ceil(n_actions / 8) bytes instead of one int64 per
+    invalid action, which matters at the real ~13k-word action space.
     """
 
-    def __init__(self, capacity, obs_size, alpha=0.6, eps=1e-6, rng=None):
+    def __init__(self, capacity, obs_size, n_actions, alpha=0.6, eps=1e-6, rng=None):
         self.capacity = capacity
+        self.n_actions = n_actions
         self.alpha = alpha
         self.eps = eps
         self.rng = rng if rng is not None else np.random.default_rng()
@@ -56,13 +63,15 @@ class ReplayBuffer:
         self.reward = np.zeros(capacity, dtype=np.float32)
         self.done = np.zeros(capacity, dtype=bool)
         self.priority = np.zeros(capacity, dtype=np.float64)
-        self.invalid_next = [None] * capacity
+        self.legal_next = np.zeros(
+            (capacity, -(-n_actions // 8)), dtype=np.uint8
+        )
         self.n_seen = 0
 
     def __len__(self):
         return min(self.n_seen, self.capacity)
 
-    def add(self, state, action, reward, next_state, done, invalid_next):
+    def add(self, state, action, reward, next_state, done, legal_next):
         n = len(self)
         i = self.n_seen % self.capacity
         self.state[i] = state
@@ -70,12 +79,21 @@ class ReplayBuffer:
         self.action[i] = int(action)
         self.reward[i] = reward
         self.done[i] = bool(done)
-        self.invalid_next[i] = np.asarray(invalid_next, dtype=np.int64)
+        self.legal_next[i] = np.packbits(np.asarray(legal_next, dtype=bool))
         # Standard PER: a new transition gets the current max priority so it
         # is replayed at least once soon.
         self.priority[i] = self.priority[:n].max() if n > 0 else 1.0
         self.n_seen += 1
         return i
+
+    def legal_mask(self, idx):
+        """Unpack the legal-action mask for the given row indices.
+
+        Returns a bool array of shape (len(idx), n_actions).
+        """
+        return np.unpackbits(
+            self.legal_next[idx], axis=1, count=self.n_actions
+        ).astype(bool)
 
     def sample_prioritized(self, batch_size, beta):
         n = len(self)
@@ -99,10 +117,9 @@ class ReplayBuffer:
         """Drop everything except k rows chosen uniformly without replacement."""
         n = len(self)
         keep = self.rng.choice(n, size=min(k, n), replace=False)
-        for name in ("state", "next_state", "action", "reward", "done", "priority"):
+        for name in ("state", "next_state", "action", "reward", "done", "priority", "legal_next"):
             arr = getattr(self, name)
             arr[: keep.size] = arr[keep]
-        self.invalid_next[: keep.size] = [self.invalid_next[i] for i in keep]
         self.n_seen = int(keep.size)
 
 

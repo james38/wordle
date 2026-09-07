@@ -13,7 +13,11 @@ trainer on an SE-ResNet, and a plain DQN trainer on a transformer.
       gym_wordle/agents/dqn.py         SE-ResNet DQN (flat or factored head)
       gym_wordle/agents/transformer.py transformer DQN
       tests/                           pytest suite on a small fixture list
-      ppo_agent.py, restore_policy.py  STALE: Ray 1.x RLlib, not ported
+      ppo_agent.py, restore_policy.py  STALE: Ray 1.x RLlib, not ported,
+                                        kept for reference; restore_policy.py
+                                        still imports the removed
+                                        gym_wordle.envs.wordle_rl module and
+                                        is not runnable
     docs/superpowers/             design spec and implementation plan
 
 The action space is the sorted union of both word lists (12947 words).
@@ -58,3 +62,5 @@ versus about 20M for the flat head.
 
 The original 2022-2023 code used OpenAI `gym`, pickled whole models, and
 had several training bugs; see `docs/superpowers/specs/` for what changed.
+Checkpoints saved by the 2023 code (pickled whole models) cannot be loaded
+by the new trainers; retrain from scratch.

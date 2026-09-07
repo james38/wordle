@@ -189,7 +189,12 @@ class DQNTrainer:
         if fixed_start is None:
             self.fixed_start = None
         elif isinstance(fixed_start, str):
-            self.fixed_start = self.env.word_to_action[fixed_start]
+            try:
+                self.fixed_start = self.env.word_to_action[fixed_start]
+            except KeyError:
+                raise ValueError(
+                    f"fixed_start word {fixed_start!r} is not in the word list"
+                ) from None
         else:
             self.fixed_start = int(fixed_start)
         self.head = head
@@ -276,7 +281,7 @@ class DQNTrainer:
             self.optimizer, T_max=T_max or max_episodes
         )
         self.buffer = ReplayBuffer(
-            max_exp, self.env.obs_size, alpha=self.p_alpha, rng=self.np_rng
+            max_exp, self.env.obs_size, self.n_actions, alpha=self.p_alpha, rng=self.np_rng
         )
         self.batch_size = batch_size
         # Decay so epsilon reaches about half of min_epsilon by the end,
@@ -299,9 +304,10 @@ class DQNTrainer:
         cont = np.flatnonzero(~buf.done[idx])
         if cont.size:
             next_obs = buf.next_state[idx[cont]]
-            invalid_next = [buf.invalid_next[i] for i in idx[cont]]
+            legal = buf.legal_mask(idx[cont])
+            invalid = torch.from_numpy(~legal).to(self.device)
             # Double DQN: the online net picks a*, the target net values it.
-            a_star, _ = masked_argmax(self.q_values(self.model, next_obs), invalid_next)
+            a_star, _ = masked_argmax(self.q_values(self.model, next_obs), invalid)
             next_in = obs_to_input(next_obs, self.env, self.device)
             with torch.no_grad():
                 q_next = torch.gather(self.target_model(next_in), 1, a_star)
@@ -362,7 +368,7 @@ class DQNTrainer:
                 # the bootstrap argmax over next_obs.
                 self.buffer.add(
                     obs, action, reward, next_obs, terminated,
-                    invalid_from_mask(info["action_mask"]),
+                    info["action_mask"],
                 )
                 self.learn(influence)
                 obs = next_obs

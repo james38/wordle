@@ -48,11 +48,12 @@ def test_masked_argmax_does_not_mutate_input():
 
 @pytest.fixture
 def buf():
-    return ReplayBuffer(capacity=4, obs_size=3, rng=np.random.default_rng(0))
+    return ReplayBuffer(capacity=4, obs_size=3, n_actions=3, rng=np.random.default_rng(0))
 
 
 def _add(buf, reward=0.0, done=False):
-    return buf.add(np.zeros(3, np.int8), 1, reward, np.ones(3, np.int8), done, np.array([0]))
+    legal = np.array([False, True, True])
+    return buf.add(np.zeros(3, np.int8), 1, reward, np.ones(3, np.int8), done, legal)
 
 
 def test_new_rows_get_current_max_priority(buf):
@@ -96,13 +97,59 @@ def test_sample_with_probs(buf):
 
 
 def test_keep_random_subset(buf):
-    for r in [0.0, 1.0, 2.0, 3.0]:
-        _add(buf, r)
+    masks = [
+        np.array([False, True, True]),
+        np.array([False, False, True]),
+        np.array([True, True, False]),
+        np.array([False, True, False]),
+    ]
+    for r, mask in zip([0.0, 1.0, 2.0, 3.0], masks):
+        buf.add(np.zeros(3, np.int8), 1, r, np.ones(3, np.int8), False, mask)
+    reward_to_mask = {r: mask for r, mask in zip([0.0, 1.0, 2.0, 3.0], masks)}
     buf.keep_random_subset(2)
     assert len(buf) == 2 and buf.n_seen == 2
     assert set(buf.reward[:2].tolist()) <= {0.0, 1.0, 2.0, 3.0}
     assert len(buf.reward[:2].tolist()) == len(set(buf.reward[:2].tolist()))
-    assert all(isinstance(x, np.ndarray) for x in buf.invalid_next[:2])
+    # legal_next rows must travel with the reward row they belong to.
+    kept_masks = buf.legal_mask(np.array([0, 1]))
+    for r, kept in zip(buf.reward[:2].tolist(), kept_masks):
+        assert kept.tolist() == reward_to_mask[r].tolist()
+
+
+def test_legal_mask_round_trips_small_and_large_masks():
+    rng = np.random.default_rng(1)
+    small = ReplayBuffer(capacity=2, obs_size=1, n_actions=19, rng=rng)
+    mask19 = rng.random(19) > 0.5
+    small.add(np.zeros(1, np.int8), 0, 0.0, np.zeros(1, np.int8), False, mask19)
+    assert small.legal_mask(np.array([0]))[0].tolist() == mask19.tolist()
+
+    big = ReplayBuffer(capacity=2, obs_size=1, n_actions=12947, rng=rng)
+    mask_big = rng.random(12947) > 0.5
+    big.add(np.zeros(1, np.int8), 0, 0.0, np.zeros(1, np.int8), False, mask_big)
+    assert big.legal_mask(np.array([0]))[0].tolist() == mask_big.tolist()
+
+
+def test_legal_next_storage_is_bounded_per_row():
+    buf = ReplayBuffer(capacity=100, obs_size=1, n_actions=12947, rng=np.random.default_rng(0))
+    assert buf.legal_next.shape[1] == -(-12947 // 8)  # ceil(n_actions / 8)
+    assert buf.legal_next.nbytes / buf.capacity < 2048
+
+
+def test_masked_argmax_bool_tensor_matches_list_of_masks():
+    rng = np.random.default_rng(2)
+    q = torch.as_tensor(rng.normal(size=(3, 19)).astype(np.float32))
+    masks = []
+    for _ in range(3):
+        mask = rng.random(19) > 0.5
+        if not mask.any():
+            mask[0] = True
+        masks.append(mask)
+    invalid_list = [np.flatnonzero(~m) for m in masks]
+    invalid_tensor = torch.as_tensor(np.stack([~m for m in masks]))
+    a1, v1 = masked_argmax(q, invalid_list)
+    a2, v2 = masked_argmax(q, invalid_tensor)
+    assert a1.tolist() == a2.tolist()
+    assert v1.tolist() == v2.tolist()
 
 
 class Tiny(nn.Module):

@@ -53,7 +53,6 @@ def test_resnn_checkpoint_roundtrip(tmp_path, env):
 
 import os
 
-from gym_wordle.agents.common import invalid_from_mask
 from gym_wordle.agents.dqn import DQNTrainer, main, run_episode
 
 
@@ -77,7 +76,7 @@ def test_learn_with_single_nonterminal_transition(env, tmp_path):
     a = env.word_to_action["crane"]
     next_obs, r, term, _, info = env.step(a)
     assert term is False
-    t.buffer.add(obs, a, r, next_obs, term, invalid_from_mask(info["action_mask"]))
+    t.buffer.add(obs, a, r, next_obs, term, info["action_mask"])
     loss = t.learn()
     assert np.isfinite(loss)
 
@@ -89,7 +88,7 @@ def test_learn_leaves_target_in_eval_with_no_grads(env, tmp_path):
     for w in ["crane", "stale"]:
         a = env.word_to_action[w]
         next_obs, r, term, _, info = env.step(a)
-        t.buffer.add(obs, a, r, next_obs, term, invalid_from_mask(info["action_mask"]))
+        t.buffer.add(obs, a, r, next_obs, term, info["action_mask"])
         obs = next_obs
     t.learn()
     assert not t.target_model.training
@@ -99,11 +98,15 @@ def test_learn_leaves_target_in_eval_with_no_grads(env, tmp_path):
 
 def test_bootstrap_mask_is_taken_from_post_step_state(env, tmp_path):
     t = make_trainer(env, tmp_path)
-    t.solve(max_episodes=1, batch_size=1, max_exp=8)
-    first = t.buffer.invalid_next[0]
-    # In s' the guess just played is invalid, so the stored mask must contain it.
-    assert first.size >= 1
-    assert t.buffer.action[0] in first
+    t.setup(max_episodes=1, batch_size=1, max_exp=8)
+    obs, info = env.reset(options={"secret_word": "apple"})
+    a = env.word_to_action["crane"]
+    next_obs, r, term, _, info = env.step(a)
+    t.buffer.add(obs, a, r, next_obs, term, info["action_mask"])
+    legal = t.buffer.legal_mask(np.array([0]))[0]
+    # In s' the guess just played is illegal, so the stored mask must reflect that.
+    assert not legal[a]
+    assert legal.tolist() == list(bool(x) for x in info["action_mask"])
 
 
 def test_beta_advances_per_episode_and_clamps(env, tmp_path):
@@ -138,6 +141,11 @@ def test_fixed_start_used_once_then_masked(env, tmp_path):
     assert env.words[a2] != "dealt"
 
 
+def test_fixed_start_unknown_word_raises_value_error(env, tmp_path):
+    with pytest.raises(ValueError):
+        make_trainer(env, tmp_path, fixed_start="zzzzz")
+
+
 def test_run_episode_terminates_with_valid_guesses(env, tmp_path):
     t = make_trainer(env, tmp_path)
     t.setup(max_episodes=1, batch_size=1, max_exp=8)
@@ -161,15 +169,15 @@ def test_learn_handles_mixed_terminal_and_nonterminal_batch(env):
     # one non-terminal transition
     a = env.word_to_action["crane"]
     obs2, r, term, _, info2 = env.step(a)
-    trainer.buffer.add(obs, a, r, obs2, term, invalid_from_mask(info2["action_mask"]))
+    trainer.buffer.add(obs, a, r, obs2, term, info2["action_mask"])
     # one terminal (winning) transition
     a_win = env.word_to_action["apple"]
     obs3, r3, term3, _, info3 = env.step(a_win)
     assert term3 and r3 > 0
-    trainer.buffer.add(obs2, a_win, r3, obs3, term3, invalid_from_mask(info3["action_mask"]))
+    trainer.buffer.add(obs2, a_win, r3, obs3, term3, info3["action_mask"])
     # pad so the batch has both kinds
     for _ in range(2):
-        trainer.buffer.add(obs, a, r, obs2, term, invalid_from_mask(info2["action_mask"]))
+        trainer.buffer.add(obs, a, r, obs2, term, info2["action_mask"])
     loss = trainer.learn()
     assert np.isfinite(loss)
     assert np.isfinite(trainer.buffer.priority[: len(trainer.buffer)]).all()

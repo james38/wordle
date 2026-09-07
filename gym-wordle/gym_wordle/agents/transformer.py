@@ -180,7 +180,9 @@ class TransformerTrainer:
         self.sync_target()
         self.loss_fx = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.alpha)
-        self.buffer = ReplayBuffer(max_experience, self.env.obs_size, rng=self.np_rng)
+        self.buffer = ReplayBuffer(
+            max_experience, self.env.obs_size, self.n_actions, rng=self.np_rng
+        )
         self.batch_size = batch_size
         self.epsilon_decay = float(
             np.exp(np.log((self.min_epsilon / 2) / self.epsilon) / (max_episodes * 5))
@@ -203,11 +205,12 @@ class TransformerTrainer:
         ).view(-1, 1)
         done = torch.as_tensor(buf.done[idx], device=self.device).view(-1, 1)
         next_in = self.to_input(buf.next_state[idx])
-        invalid_next = [buf.invalid_next[i] for i in idx]
+        legal = buf.legal_mask(idx)
+        invalid = torch.from_numpy(~legal).to(self.device)
         with torch.no_grad():
-            _, q_next = masked_argmax(self.target_model(next_in), invalid_next)
+            _, q_next = masked_argmax(self.target_model(next_in), invalid)
             if teacher_influence > 0 and self.teacher_model is not None:
-                _, q_teacher = masked_argmax(self.teacher_model(next_in), invalid_next)
+                _, q_teacher = masked_argmax(self.teacher_model(next_in), invalid)
                 q_next = (1 - teacher_influence) * q_next + teacher_influence * q_teacher
         # A terminal next-state may have every action masked (q_next = -inf);
         # torch.where selects the plain reward for those rows.
@@ -266,7 +269,7 @@ class TransformerTrainer:
                 episode_reward += reward
                 self.buffer.add(
                     obs, action, reward, next_obs, terminated,
-                    invalid_from_mask(info["action_mask"]),
+                    info["action_mask"],
                 )
                 self.learn(influence)
                 obs = next_obs

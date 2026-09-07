@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from gym_wordle.agents.common import invalid_from_mask, load_checkpoint, save_checkpoint
+from gym_wordle.agents.common import load_checkpoint, save_checkpoint
 from gym_wordle.agents.transformer import (
     PositionalEncoding,
     TransformerQNet,
@@ -69,7 +69,7 @@ def test_learn_with_terminal_row_whose_mask_is_empty_is_finite(env, tmp_path):
     a = env.word_to_action["apple"]
     next_obs, r, term, _, info = env.step(a)  # win: every remaining word is now masked
     assert term is True and not info["action_mask"].any()
-    t.buffer.add(obs, a, r, next_obs, term, invalid_from_mask(info["action_mask"]))
+    t.buffer.add(obs, a, r, next_obs, term, info["action_mask"])
     assert np.isfinite(t.learn())
 
 
@@ -80,7 +80,7 @@ def test_learn_leaves_target_in_eval_with_no_grads(env, tmp_path):
     for w in ["crane", "stale"]:
         a = env.word_to_action[w]
         next_obs, r, term, _, info = env.step(a)
-        t.buffer.add(obs, a, r, next_obs, term, invalid_from_mask(info["action_mask"]))
+        t.buffer.add(obs, a, r, next_obs, term, info["action_mask"])
         obs = next_obs
     t.learn()
     assert not t.target_model.training and t.model.training
