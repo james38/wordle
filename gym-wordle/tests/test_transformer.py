@@ -10,6 +10,7 @@ from gym_wordle.agents.transformer import (
     PositionalEncoding,
     TransformerQNet,
     TransformerTrainer,
+    main,
 )
 from gym_wordle.envs.wordle_env import WordleEnv
 
@@ -98,3 +99,10 @@ def test_stored_observations_are_copies(env, tmp_path):
     t.solve(max_episodes=1, batch_size=1, max_experience=8)
     assert not t.buffer.state[0].any()  # first stored state is the empty board
     assert t.buffer.next_state[0][0] == 1
+
+
+def test_main_eval_only_requires_checkpoint(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--eval-only"])
+    assert exc.value.code == 2
+    assert "--eval-only requires --checkpoint" in capsys.readouterr().err
