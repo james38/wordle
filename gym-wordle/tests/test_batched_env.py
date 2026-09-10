@@ -103,6 +103,24 @@ def test_played_word_never_legal_again_and_illegal_raises(lists):
         env.step(a)
 
 
+def test_mask_cache_matches_fresh_legal_mask(lists):
+    """The pre-step guard mask cached from the previous observation() must agree
+    exactly with a freshly computed legal_mask(), and the illegal-action guard
+    must still fire off the cache."""
+    env = make(lists, n=2, hard_mode=True)
+    env.set_secrets(torch.tensor([env.word_to_action["apple"], env.word_to_action["delta"]]))
+    assert torch.equal(env._mask, env.legal_mask())
+
+    a = torch.tensor([env.word_to_action["crane"], env.word_to_action["slate"]])
+    obs, _, done, _ = env.step(a)
+    assert not done.any()          # neither guess matches its secret: no auto-reset
+    assert torch.equal(env._mask, env.legal_mask())
+    assert torch.equal(obs["mask"], env.legal_mask())
+
+    with pytest.raises(ValueError):
+        env.step(a)   # crane/slate already guessed by both games
+
+
 def test_legal_mask_hard_vs_normal(lists):
     hard = make(lists, n=1, hard_mode=True)
     soft = make(lists, n=1, hard_mode=False)
@@ -175,6 +193,25 @@ def test_shaping_off_gives_zero_intermediate_reward(lists):
     env.set_secrets(torch.tensor([env.word_to_action["crane"]]))
     _, r, _, _ = env.step(torch.tensor([env.word_to_action["slate"]]))
     assert r.item() == 0.0
+
+
+def test_shaping_cand_resets_to_full_dict_after_auto_reset(lists):
+    """A game that solves (and auto-resets) mid-rollout must not carry its stale,
+    narrowed candidate count into the freshly reset game's next shaping term."""
+    words, _ = lists
+    env = make(lists, n=1, hard_mode=False, shaping_coef=0.5)
+    env.set_secrets(torch.tensor([env.word_to_action["crane"]]))
+    _, _, d, _ = env.step(torch.tensor([env.word_to_action["crane"]]))   # solves -> auto-resets
+    assert d.item()
+    assert env._cand.item() == len(words)
+
+    new_secret_idx = env.secret.item()
+    guess_word = next(w for w in words if env.word_to_action[w] != new_secret_idx)
+    _, r2, d2, _ = env.step(torch.tensor([env.word_to_action[guess_word]]))
+    assert not d2.item()
+    after = env.candidates().item()
+    import math
+    assert r2.item() == pytest.approx(0.5 * (math.log2(len(words)) - math.log2(after)))
 
 
 def test_batched_wordle_exported():

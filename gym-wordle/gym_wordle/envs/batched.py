@@ -63,12 +63,14 @@ class BatchedWordle:
         self.min_count = torch.zeros(N, N_ALPHABET, dtype=torch.int8, device=self.device)
         self._rows = torch.arange(N, device=self.device)
         self._cand = None
+        self._mask = None
 
     # ------------------------------------------------------------------ api
 
     def reset(self):
         self._reset_rows(torch.ones(self.n_games, dtype=torch.bool, device=self.device), self._draw_secrets())
         self._cand = None
+        self._mask = None
         return self.observation()
 
     def set_secrets(self, indices):
@@ -77,6 +79,7 @@ class BatchedWordle:
         assert indices.shape == (self.n_games,), indices.shape
         self._reset_rows(torch.ones(self.n_games, dtype=torch.bool, device=self.device), indices)
         self._cand = None
+        self._mask = None
         return self.observation()
 
     def legal_mask(self):
@@ -88,7 +91,10 @@ class BatchedWordle:
     def step(self, actions):
         actions = torch.as_tensor(actions, dtype=torch.long, device=self.device)
         assert actions.shape == (self.n_games,), actions.shape
-        if not bool(self.legal_mask()[self._rows, actions].all()):
+        # Guard needs the PRE-step mask: reuse the one observation() cached last
+        # call (post previous step / reset) instead of recomputing it here.
+        guard_mask = self._mask if self._mask is not None else self.legal_mask()
+        if not bool(guard_mask[self._rows, actions].all()):
             raise ValueError("illegal action passed to BatchedWordle.step")
 
         t = self.turn
@@ -116,7 +122,7 @@ class BatchedWordle:
         info = {"solved": solved, "n_guesses": self.turn.clone(), "secret": self.secret.clone()}
         self._reset_rows(done, self._draw_secrets())
         if self.shaping_coef > 0:
-            self._cand = self.candidates()
+            self._cand = torch.where(done, torch.full_like(after, len(self.words)), after)
         return self.observation(), reward, done, info
 
     def observation(self):
@@ -126,7 +132,9 @@ class BatchedWordle:
         turn_idx = torch.arange(T, device=self.device).repeat_interleave(n).unsqueeze(0).expand(N, T * n)
         tokens = torch.stack([letters, cols, turn_idx], dim=-1)          # (N, T*n, 3)
         pad = turn_idx >= self.turn.unsqueeze(1)                          # cells of guesses not yet made
-        return {"tokens": tokens, "pad": pad, "turn": self.turn.clone(), "mask": self.legal_mask()}
+        mask = self.legal_mask()
+        self._mask = mask
+        return {"tokens": tokens, "pad": pad, "turn": self.turn.clone(), "mask": mask}
 
     def candidates(self):
         """Number of valid words consistent with every past guess, per game."""
@@ -149,3 +157,4 @@ class BatchedWordle:
         self.guessed[rows] = False
         self.green_pos[rows] = -1
         self.min_count[rows] = 0
+        self._mask = None
