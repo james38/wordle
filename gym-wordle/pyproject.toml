@@ -1,7 +1,7 @@
 [project]
 name = "gym-wordle"
 version = "2.0.0"
-description = "Wordle as a gymnasium environment, with DQN agents"
+description = "Wordle as a batched RL environment, with a PPO transformer agent"
 requires-python = ">=3.10"
 dependencies = [
     "gymnasium>=1.0",
