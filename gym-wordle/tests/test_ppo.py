@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from gym_wordle.agents.common import word_feature_matrix
+from gym_wordle.agents.ppo import train as train_mod
 from gym_wordle.agents.ppo.model import WordlePolicy
 from gym_wordle.agents.ppo.ppo import PPOConfig, RolloutBuffer, ppo_update
 from gym_wordle.envs.batched import BatchedWordle
@@ -36,23 +37,17 @@ def small(env_paths):
     return words, env, policy
 
 
-def fill_buffer(env, policy, T):
+def _collect_buf(env, policy, T):
+    """Run the real trainer collect() for T steps and GAE it, for use as test fixture data."""
     buf = RolloutBuffer(T, env.n_games, env.max_attempts * env.n_letters, len(env.words), "cpu")
-    obs = env.reset()
-    with torch.no_grad():
-        for t in range(T):
-            a, lp, ent, v = policy.act(obs)
-            next_obs, r, d, _ = env.step(a)
-            buf.store(t, obs, a, lp, v, r, d)
-            obs = next_obs
-        _, last_v = policy(obs)
-    buf.compute_gae(last_v, 1.0, 0.95)
+    obs, last_value, stats = train_mod.collect(policy, env, buf, env.reset(), torch.zeros(env.n_games))
+    buf.compute_gae(last_value, 1.0, 0.95)
     return buf
 
 
 def test_store_and_flat_obs_roundtrip(small):
     words, env, policy = small
-    buf = fill_buffer(env, policy, T=4)
+    buf = _collect_buf(env, policy, T=4)
     idx = torch.tensor([0, 9, 31])
     ob = buf.flat_obs(idx)
     assert ob["tokens"].shape == (3, 30, 3) and ob["mask"].shape == (3, len(words))
@@ -60,10 +55,19 @@ def test_store_and_flat_obs_roundtrip(small):
     assert torch.equal(ob["turn"][2], buf.turn[3, 7])
     assert buf.mask[torch.arange(4).unsqueeze(1), torch.arange(8).unsqueeze(0), buf.actions].all()
 
+    # Pre-step-obs / post-step-reward alignment: the value stored at row t is the
+    # policy's value estimate on the pre-step observation stored at row t, so
+    # re-running the policy on flat_obs for step t's flat indices must reproduce it.
+    t = 2
+    idx_t = torch.arange(t * env.n_games, (t + 1) * env.n_games)
+    with torch.no_grad():
+        _, v = policy(buf.flat_obs(idx_t))
+    assert torch.allclose(buf.values[t], v)
+
 
 def test_one_update_runs_and_is_finite(small):
     words, env, policy = small
-    buf = fill_buffer(env, policy, T=4)
+    buf = _collect_buf(env, policy, T=4)
     opt = torch.optim.Adam(policy.parameters(), lr=1e-3)
     cfg = PPOConfig(minibatch=16, epochs=2, target_kl=None)
     stats = ppo_update(policy, opt, buf, cfg)
@@ -76,7 +80,7 @@ def test_one_update_runs_and_is_finite(small):
 def test_update_moves_logprobs_along_advantages(small):
     """One small step must raise log-probs where advantage is positive and lower them where negative."""
     words, env, policy = small
-    buf = fill_buffer(env, policy, T=4)
+    buf = _collect_buf(env, policy, T=4)
     torch.manual_seed(1)
     buf.advantages = torch.randn_like(buf.advantages)
     n = buf.T * buf.N
@@ -95,13 +99,10 @@ def test_update_moves_logprobs_along_advantages(small):
 
 def test_target_kl_stops_epochs_early(small):
     words, env, policy = small
-    buf = fill_buffer(env, policy, T=4)
+    buf = _collect_buf(env, policy, T=4)
     opt = torch.optim.Adam(policy.parameters(), lr=1e-1)   # huge lr -> big KL
     stats = ppo_update(policy, opt, buf, PPOConfig(minibatch=32, epochs=8, target_kl=1e-6))
     assert stats["epochs_run"] < 8
-
-
-from gym_wordle.agents.ppo import train as train_mod
 
 
 def test_eval_only_requires_checkpoint():

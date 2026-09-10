@@ -57,6 +57,9 @@ class WordlePolicy(nn.Module):
     def forward(self, obs):
         tokens, pad, turn, mask = obs["tokens"], obs["pad"], obs["turn"], obs["mask"]
         B, S, _ = tokens.shape
+        # Slot index is derived from position, not read from tokens[..., 2]: this relies
+        # on BatchedWordle.observation() laying tokens out turn-major (slot = turn *
+        # n_letters + position), so torch.arange(S) already equals that layout.
         slots = torch.arange(S, device=tokens.device).unsqueeze(0).expand(B, S)
         x = self.letter_emb(tokens[..., 0]) + self.colour_emb(tokens[..., 1]) + self.slot_emb(slots)
         r = (self.readout + self.turn_emb(turn)).unsqueeze(1)                   # (B,1,d)
