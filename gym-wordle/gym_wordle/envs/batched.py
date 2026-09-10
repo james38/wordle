@@ -120,7 +120,13 @@ class BatchedWordle:
         return self.observation(), reward, done, info
 
     def observation(self):
-        return {"mask": self.legal_mask()}          # extended in Task 4
+        N, T, n = self.guess_letters.shape
+        letters = self.guess_letters.reshape(N, T * n).long()
+        cols = self.colours.reshape(N, T * n).long()
+        turn_idx = torch.arange(T, device=self.device).repeat_interleave(n).unsqueeze(0).expand(N, T * n)
+        tokens = torch.stack([letters, cols, turn_idx], dim=-1)          # (N, T*n, 3)
+        pad = turn_idx >= self.turn.unsqueeze(1)                          # cells of guesses not yet made
+        return {"tokens": tokens, "pad": pad, "turn": self.turn.clone(), "mask": self.legal_mask()}
 
     def candidates(self):
         """Number of valid words consistent with every past guess, per game."""

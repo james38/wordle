@@ -124,3 +124,59 @@ def test_hard_mode_bookkeeping(lists):
     assert env.green_pos[0].tolist() == [-1, -1, L["p"], -1, -1]
     mc = env.min_count[0]
     assert mc[L["p"]] == 2 and mc[L["a"]] == 1 and mc[L["e"]] == 1 and mc[L["r"]] == 0
+
+
+def test_observation_layout(lists):
+    env = make(lists, n=2)
+    env.set_secrets(torch.tensor([env.word_to_action["apple"], env.word_to_action["crane"]]))
+    obs = env.observation()
+    assert obs["tokens"].shape == (2, 30, 3) and obs["tokens"].dtype == torch.long
+    assert obs["pad"].shape == (2, 30) and obs["pad"].all()
+    assert obs["turn"].tolist() == [0, 0]
+    assert obs["mask"].shape == (2, len(lists[0]))
+
+    obs, *_ = env.step(torch.tensor([env.word_to_action["paper"], env.word_to_action["slate"]]))
+    from gym_wordle.envs.wordle_env import LETTER_INDEX as L
+    row = obs["tokens"][0]
+    assert row[:5, 0].tolist() == [L[c] for c in "paper"]
+    assert row[:5, 1].tolist() == [1, 1, 2, 1, 0]
+    assert row[:5, 2].tolist() == [0] * 5
+    assert row[5:10, 2].tolist() == [1] * 5
+    assert obs["pad"][0].tolist() == [False] * 5 + [True] * 25
+    assert obs["turn"].tolist() == [1, 1]
+    assert torch.equal(obs["mask"], env.legal_mask())
+
+
+def test_observation_after_auto_reset_is_fresh(lists):
+    env = make(lists, n=1)
+    env.set_secrets(torch.tensor([env.word_to_action["crane"]]))
+    obs, _, done, _ = env.step(torch.tensor([env.word_to_action["crane"]]))
+    assert done.item()
+    assert obs["pad"].all() and obs["turn"].item() == 0 and obs["mask"].all()
+
+
+def test_candidates_and_shaping(lists):
+    words, _ = lists
+    env = make(lists, n=1, hard_mode=False, shaping_coef=0.5)
+    env.set_secrets(torch.tensor([env.word_to_action["crane"]]))
+    assert env.candidates().item() == len(words)
+    _, r, _, _ = env.step(torch.tensor([env.word_to_action["slate"]]))
+    after = env.candidates().item()
+    assert 0 < after < len(words)
+    import math
+    assert r.item() == pytest.approx(0.5 * (math.log2(len(words)) - math.log2(after)))
+    _, r2, d, _ = env.step(torch.tensor([env.word_to_action["crane"]]))
+    assert d.item()
+    assert r2.item() == pytest.approx(env.rewards[1].item() + 0.5 * (math.log2(after) - 0.0))
+
+
+def test_shaping_off_gives_zero_intermediate_reward(lists):
+    env = make(lists, n=1, hard_mode=False)
+    env.set_secrets(torch.tensor([env.word_to_action["crane"]]))
+    _, r, _, _ = env.step(torch.tensor([env.word_to_action["slate"]]))
+    assert r.item() == 0.0
+
+
+def test_batched_wordle_exported():
+    from gym_wordle.envs import BatchedWordle as B
+    assert B is BatchedWordle
