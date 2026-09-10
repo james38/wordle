@@ -36,6 +36,11 @@ The action space is the sorted union of both word lists (12947 words).
     uv run python -m gym_wordle.agents.ppo.train
     uv run python -m gym_wordle.agents.ppo.train --eval-only --checkpoint runs/<stamp>/policy_final.pt
 
+`--checkpoint` during training only warm-starts the policy weights: optimizer
+state, the iteration count and the LR schedule all restart from scratch, and
+`--d-model/--n-layers/--n-heads/--d-ff` are ignored in favour of the
+checkpoint's own constructor kwargs. There is no true resume.
+
 The env plays 2048 games in lockstep on the GPU. The policy sees one token
 per board cell (letter, colour, slot), prepends a learned readout token,
 runs a small pre-norm transformer, and scores every valid word as the dot

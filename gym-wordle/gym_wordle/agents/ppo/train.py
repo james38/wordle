@@ -27,25 +27,34 @@ def collect(policy, env, buf, obs, ep_ret):
     """Roll the policy for buf.T steps. Returns (obs, last_value, episode stats).
 
     ep_ret accumulates per-game return across calls and is zeroed on done.
+    Nothing crosses to the host during the loop: finished/solved counts and
+    guess/return sums are accumulated as device tensors and only pulled to
+    Python once, after the loop, when building `stats`.
     """
     policy.eval()
-    solved_n, finished_n, guesses_sum, ret_sum = 0, 0, 0.0, 0.0
+    device = ep_ret.device
+    finished_n = torch.zeros((), dtype=torch.long, device=device)
+    solved_n = torch.zeros((), dtype=torch.long, device=device)
+    guesses_sum = torch.zeros((), dtype=torch.float32, device=device)
+    ret_sum = torch.zeros((), dtype=torch.float32, device=device)
     with torch.no_grad():
         for t in range(buf.T):
             action, log_prob, _, value = policy.act(obs)
             next_obs, reward, done, info = env.step(action)
             buf.store(t, obs, action, log_prob, value, reward, done)
             ep_ret += reward
-            if bool(done.any()):
-                fin = done
-                solved = info["solved"][fin]
-                finished_n += int(fin.sum())
-                solved_n += int(solved.sum())
-                guesses_sum += float(info["n_guesses"][fin][solved].sum())
-                ret_sum += float(ep_ret[fin].sum())
-                ep_ret[fin] = 0.0
+            solved = info["solved"]
+            finished_n += done.sum()
+            solved_n += solved.sum()
+            guesses_sum += (info["n_guesses"] * solved).sum().float()
+            ret_sum += (ep_ret * done).sum()
+            ep_ret = torch.where(done, torch.zeros_like(ep_ret), ep_ret)
             obs = next_obs
         _, last_value = policy(obs)
+    finished_n = int(finished_n.item())
+    solved_n = int(solved_n.item())
+    guesses_sum = float(guesses_sum.item())
+    ret_sum = float(ret_sum.item())
     stats = {
         "episodes": finished_n,
         "solve_rate": solved_n / finished_n if finished_n else float("nan"),
@@ -112,7 +121,11 @@ def build_parser():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--run-dir", default=None, help="default runs/<timestamp>")
     p.add_argument("--checkpoint-every", type=int, default=25)
-    p.add_argument("--checkpoint", default=None, help="resume from / evaluate this .pt file")
+    p.add_argument(
+        "--checkpoint", default=None,
+        help="warm-start the policy weights from this .pt file (optimizer state, iteration "
+             "count and LR schedule are NOT restored), or evaluate it with --eval-only",
+    )
     p.add_argument("--eval-only", action="store_true")
     return p
 
@@ -125,6 +138,12 @@ def train(args):
     env = BatchedWordle(words, solutions, args.n_games, hard_mode=args.hard_mode, L=args.L,
                         shaping_coef=args.shaping_coef, device=device, seed=args.seed)
     if args.checkpoint:
+        log.warning(
+            "loading --checkpoint %s: this warm-starts the policy weights only. Optimizer "
+            "state and the LR schedule restart from scratch, and --d-model/--n-layers/"
+            "--n-heads/--d-ff are ignored in favour of the checkpoint's own constructor kwargs.",
+            args.checkpoint,
+        )
         policy = load_checkpoint(WordlePolicy, args.checkpoint, device)
     else:
         policy = WordlePolicy(
