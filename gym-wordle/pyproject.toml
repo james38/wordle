@@ -21,3 +21,4 @@ packages = ["gym_wordle"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: takes tens of seconds; run with -m slow or by default"]

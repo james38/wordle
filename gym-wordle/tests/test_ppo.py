@@ -99,3 +99,48 @@ def test_target_kl_stops_epochs_early(small):
     opt = torch.optim.Adam(policy.parameters(), lr=1e-1)   # huge lr -> big KL
     stats = ppo_update(policy, opt, buf, PPOConfig(minibatch=32, epochs=8, target_kl=1e-6))
     assert stats["epochs_run"] < 8
+
+
+from gym_wordle.agents.ppo import train as train_mod
+
+
+def test_eval_only_requires_checkpoint():
+    with pytest.raises(SystemExit):
+        train_mod.main(["--eval-only"])
+
+
+def test_collect_reports_finished_episodes(small):
+    words, env, policy = small
+    buf = RolloutBuffer(12, env.n_games, 30, len(words), "cpu")
+    obs = env.reset()
+    ep_ret = torch.zeros(env.n_games)
+    obs, last_value, stats = train_mod.collect(policy, env, buf, obs, ep_ret)
+    assert last_value.shape == (env.n_games,)
+    assert stats["episodes"] >= env.n_games          # 12 steps, games last <= 6
+    assert 0.0 <= stats["solve_rate"] <= 1.0
+    assert set(obs) == {"tokens", "pad", "turn", "mask"}
+
+
+def test_evaluate_plays_every_solution_once(small):
+    words, env, policy = small
+    out = train_mod.evaluate(policy, words, env.solutions, hard_mode=True, device="cpu")
+    assert out["fails"] + sum(out["histogram"]) == len(env.solutions)
+    assert len(out["histogram"]) == 6
+    assert 0.0 <= out["solve_rate"] <= 1.0
+
+
+@pytest.mark.slow
+def test_ppo_learns_the_fixture_game(env_paths, tmp_path):
+    argv = [
+        "--valids", str(env_paths["valid_words_path"]),
+        "--solutions", str(env_paths["solution_words_path"]),
+        "--iterations", "60", "--n-games", "64", "--rollout-len", "8",
+        "--d-model", "32", "--n-layers", "1", "--n-heads", "4", "--d-ff", "64",
+        "--minibatch", "128", "--lr", "3e-3", "--ent-coef", "0.001",
+        "--device", "cpu", "--seed", "0", "--run-dir", str(tmp_path / "run"),
+        "--checkpoint-every", "1000",
+    ]
+    policy, run_dir, final = train_mod.main(argv)
+    assert final["solve_rate"] == 1.0
+    assert (run_dir / "log.csv").exists()
+    assert (run_dir / "policy_final.pt").exists()
